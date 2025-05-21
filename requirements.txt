@@ -1,0 +1,19 @@
+# Core
+torch
+transformers
+numpy
+pandas
+scipy
+h5py
+scikit-learn
+
+# Experiment Management & Utilities
+hydra-core
+wandb
+optuna
+# For optuna integration with hydra
+hydra-optuna-sweeper
+
+# Add other specific dependencies here
+# e.g., matplotlib for plotting
+# tqdm for progress bars 

@@ -1,0 +1,83 @@
+defaults:
+  - _self_ # Inherit from this file for base settings
+  - override hydra/sweeper: optuna
+  - override hydra/launcher: basic # For local sweeping
+
+# This file is for configuring an Optuna hyperparameter sweep.
+# It will typically override parameters from config.yaml (especially model and trainer).
+
+# --- Hydra Sweeper Config ---
+hydra:
+  sweeper:
+    _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
+    # study_name: tecgpt_tuning # Optional: if not provided, Optuna generates one
+    # storage: null # Specify for distributed Optuna, e.g., "sqlite:///optuna_study.db"
+    direction: minimize # or "maximize"
+    n_trials: 50 # Number of trials to run
+    n_jobs: 1 # Number of parallel jobs for Optuna (can be > 1 for parallel optimization on a single machine)
+    # sampler:
+    #   _target_: optuna.samplers.TPESampler # Default
+    #   # seed: ${seed} # Optuna sampler seed
+    #   # n_startup_trials: 5
+    # pruner:
+    #   _target_: optuna.pruners.MedianPruner
+    #   # n_startup_trials: 5
+    #   # n_warmup_steps: 0
+    #   # interval_steps: 1
+
+# --- Parameters to Tune ---
+# These will override values in other config files (e.g., model.yaml, trainer.yaml)
+# The syntax for Optuna's choices needs to be used.
+
+# Example: Tune learning rate and a model parameter
+trainer:
+  learning_rate:
+    type: float
+    low: 1e-5
+    high: 1e-3
+    log: True # Logarithmic scale for learning rate
+
+  # optimizer_name:
+  #   type: categorical
+  #   choices: ["AdamW", "Adam"]
+
+model:
+  d_embed:
+    type: categorical # Or int with low/high if you prefer a range
+    choices: [64, 128, 256]
+
+  llm_config:
+    f_layers_to_freeze:
+      type: int
+      low: 2
+      high: 8 # Assuming a 12-layer GPT-2, don't freeze all/none
+
+# data:
+#   batch_size:
+#     type: categorical
+#     choices: [16, 32, 64]
+
+
+# You must have a main script (e.g., src/train.py or src/tune.py itself)
+# that is decorated with @hydra.main() and returns the value to be optimized
+# (e.g., validation loss).
+# The tune.py script will typically call the training script.
+# Example: if src/tune.py is the entry point for tuning:
+# main_script_for_tuning:
+#   _target_: src.tune.objective # Assuming tune.py has an objective function
+
+# If src/train.py is designed to return the metric to optimize when called by Optuna:
+# (This means train.py should return the objective value)
+# hydra:
+#   run:
+#     dir: outputs/tune/${now:%Y-%m-%d}/${now:%H-%M-%S} # Customize output for tuning runs
+#   sweep:
+#     dir: multirun/tune/${now:%Y-%m-%d}/${now:%H-%M-%S}
+#     subdir: ${hydra.job.num}
+
+# The script `src/tune.py` will be responsible for defining the objective function
+# that Optuna will minimize/maximize. This objective function will typically:
+# 1. Receive a `cfg` object (the OmegaConf object with sampled hyperparameters).
+# 2. Instantiate the model, datamodule, trainer based on `cfg`.
+# 3. Run the training (or a shortened version for HPO).
+# 4. Return the metric to be optimized (e.g., best validation loss). 

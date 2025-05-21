@@ -1,0 +1,80 @@
+_target_: src.models.tec_gpt.ST_LLM
+
+# Input/Output dimensions related to data
+p_history: ${data.p_history}  # From data config
+s_forecast: ${data.s_forecast} # From data config
+n_nodes: ??? # Should be calculated as data.n_lat * data.n_lon, e.g. 2911
+# One way to do this is to have a resolver in Hydra, or calculate it in the script.
+# For simplicity, let's assume it's hardcoded or passed during instantiation.
+# It's better if TECDataModule provides this, or the model calculates it.
+# For now, let's assume it's available.
+# n_nodes: 2911 # 41 * 71
+
+# Embedding dimensions
+d_embed: 128      # Common dimension for individual embeddings before fusion
+d_llm: 768        # LLM model dimension (e.g., GPT-2 small)
+
+# LLM (PFA-GPT2) specific config
+llm_config:
+  _target_: src.models.pfa_llm.PFA_GPT2
+  model_name: "gpt2" # or "gpt2-medium", etc.
+  n_layer: 12 # Total layers in base GPT-2
+  n_head: 12  # Number of attention heads
+  n_embd: ${..d_llm} # Should match d_llm
+  # PFA strategy
+  f_layers_to_freeze: 6 # Number of initial LLM layers to freeze (MHA+FFN)
+  # u_layers_mha_trainable: True # Implied, MHA and LayerNorm are trainable for U layers
+  # u_layers_mlp_frozen: True    # Implied, MLP (FFN) is frozen for U layers
+  # layernorm_trainable_f_layers: True # LayerNorms in F frozen layers are trainable
+
+# Embedding module configurations
+# Each embedding module will output [B, N_nodes, d_embed]
+# TecHistoryEmbedding
+tec_history_embedding:
+  _target_: src.models.embeddings.TecHistoryEmbedding
+  p_history: ${..p_history}
+  d_embed: ${..d_embed}
+  # type: "conv1d" # or "linear"
+  # conv_kernel_size: 3 # if type is conv1d
+  # conv_padding: 1     # if type is conv1d
+
+# TimeFeatureEmbedding
+time_feature_embedding:
+  _target_: src.models.embeddings.TimeFeatureEmbedding
+  # Input dim for time features is 6 (sin/cos for hour, dayofweek, dayofyear)
+  time_feat_dim: 6
+  d_embed: ${..d_embed}
+
+# SpatialEmbedding
+spatial_embedding:
+  _target_: src.models.embeddings.SpatialEmbedding
+  n_lat: ${data.n_lat}
+  n_lon: ${data.n_lon}
+  d_embed: ${..d_embed}
+  # fusion_strategy: "concat" or "add" for lat/lon embeddings before final MLP
+
+# SpaceWeatherEmbedding
+space_weather_embedding:
+  _target_: src.models.embeddings.SpaceWeatherEmbedding
+  p_history: ${..p_history}
+  sw_feat_dim: 5 # Kp, Dst, ap, F10.7, AE
+  d_embed: ${..d_embed}
+  # hidden_dims_mlp: [64, 128] # example for MLP hidden layers
+
+# FusionLayer
+# Input to fusion layer is concatenation of all 4 embeddings: 4 * d_embed
+fusion_layer:
+  _target_: src.models.embeddings.FusionLayer
+  input_dim: "$=\{eval:4 * ${..d_embed}\}" # Dynamically calculate 4 * d_embed
+  output_dim: ${..d_llm} # This should be the LLM's expected input dimension
+  # hidden_dims: [512] # example MLP hidden layers in fusion
+
+# Prediction Head
+# Input: [B, N_nodes, d_llm], Output: [B, N_nodes, s_forecast]
+prediction_head:
+  _target_: torch.nn.Linear
+  in_features: ${..d_llm}
+  out_features: ${..s_forecast}
+
+# (Optional) Path to pre-trained weights for the whole ST_LLM model, if resuming
+# pretrained_path: null 

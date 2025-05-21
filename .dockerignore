@@ -1,0 +1,38 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.git
+.gitignore
+.dockerignore
+Dockerfile
+README.md
+LICENSE
+environment.yaml # If using conda build stages, otherwise keep for reference
+
+# Hydra outputs
+outputs/
+multirun/
+
+# Wandb local files
+wandb/
+
+# Data
+data_preparation/ # Source HDF5 might be mounted or copied selectively
+processed_data/
+gpt2_cache_docker/ # Cache is for building, not for final image
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Notebook checkpoints
+.ipynb_checkpoints
+
+# IDE settings
+.vscode/
+.idea/ 
