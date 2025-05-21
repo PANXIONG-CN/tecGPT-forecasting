@@ -143,3 +143,6 @@ Y_temp.mmap
 *.hdf5
 # Add .log if you generate log files not managed by hydra/wandb
 # *.log 
+
+# 大型模型文件
+src/models/TEC-LLM/gpt2/pytorch_model.bin 
