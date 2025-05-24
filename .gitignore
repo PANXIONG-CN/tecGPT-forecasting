@@ -88,7 +88,7 @@ ipython_config.py
 # https://github.com/github/gitignore/blob/master/Python.gitignore
 Pipfile.lock
 
-# PEP 582; remove FALSproject_nameE PEP and amend this comment
+# PEP 582; remove FALSEproject_name PEP and amend this comment
 __pypackages__/
 
 # Celery stuff
@@ -125,34 +125,42 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# Hydra outputs
-outputs/
-multirun/
-
 # Wandb local files
 wandb/
 
-# Project specific
-processed_data/
-gpt2_cache_docker/
+# Project specific - data and outputs  
 processed_tec_data/
 logs/
-Y_temp.mmap
+eval_results/
 *.npz
 *.pkl
 *.hdf5
-# Add .log if you generate log files not managed by hydra/wandb
-# *.log 
 
 # 大型模型文件
-src/models/TEC-LLM/gpt2/pytorch_model.bin 
-src/models/TEC-LLM/gpt2/merges.txt
-src/models/TEC-LLM/gpt2/vocab.json
+src/models/tecGPT/gpt2/pytorch_model.bin 
+src/models/tecGPT/gpt2/merges.txt
+src/models/tecGPT/gpt2/vocab.json
 
 # Optuna database files
 *.db
 tecgpt_optuna.db
 
-# Memory mapped files
+# Memory mapped files and temporary files
 *.mmap
-Y_temp.mmap 
+Y_temp.mmap
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db 

@@ -1,173 +1,133 @@
-import hydra
-from omegaconf import DictConfig, OmegaConf
-import logging
-import os
+#!/usr/bin/env python3
+"""
+模型评估脚本
+"""
+
 import torch
-import wandb # Optional, for logging evaluation results
+import argparse
+import os
+import pandas as pd
+from tqdm import tqdm
 
-from src.datasets.tec_dataset import TECDataModule
-from src.models.tec_gpt import ST_LLM
-from src.trainers.tec_trainer import TecTrainer # Re-use eval_epoch and checkpoint loading
-from src.utils.scaler import StandardScaler as TecStandardScaler
-from src.utils.helpers import seed_everything
+from utils import util
+from models.tecGPT.tec_gpt import ST_LLM
 
-logger = logging.getLogger(__name__)
 
-@hydra.main(config_path="../conf", config_name="config", version_base=None)
-def main(cfg: DictConfig) -> None:
-    """
-    Hydra驱动的主评估函数。
-    加载指定的模型检查点并在测试集上进行评估。
+def parse_args():
+    parser = argparse.ArgumentParser(description="Model Evaluation")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to saved model")
+    parser.add_argument("--data_dir", type=str, default="./processed_tec_data", help="Data directory")
+    parser.add_argument("--scaler_path", type=str, default="./processed_tec_data/scaler.pkl", help="Scaler path")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for evaluation")
+    parser.add_argument("--output_dir", type=str, default="./eval_results", help="Output directory for results")
 
-    Args:
-        cfg (DictConfig): Hydra加载的配置对象。
-                         Key evaluation configs:
-                         - cfg.checkpoint_path: Path to the model checkpoint to evaluate.
-                         - cfg.data: Data configuration.
-                         - cfg.model: Model configuration (matching the checkpoint).
-                         - cfg.trainer: Trainer configuration (subset needed for eval).
-                         - cfg.wandb: Optional Wandb config for logging results.
-    """
-    # --- 初始设置 ---
-    seed_everything(cfg.seed)
-    logger.info(f"Global seed set to: {cfg.seed}")
-    logger.info(f"Hydra current working directory: {os.getcwd()}")
-    logger.info(f"Original working directory: {hydra.utils.get_original_cwd()}")
-    
-    if cfg.verbose:
-        logger.info("Full configuration for evaluation:\n" + OmegaConf.to_yaml(cfg))
+    # Model parameters (should match training)
+    parser.add_argument("--num_nodes", type=int, default=2911)
+    parser.add_argument("--history_len", type=int, default=12)
+    parser.add_argument("--forecast_len", type=int, default=12)
+    parser.add_argument("--tec_feat_dim", type=int, default=1)
+    parser.add_argument("--sw_feat_dim", type=int, default=5)
+    parser.add_argument("--time_feat_dim", type=int, default=6)
+    parser.add_argument("--d_embed", type=int, default=128)
+    parser.add_argument("--d_llm", type=int, default=768)
+    parser.add_argument("--local_gpt2_path", type=str, default="/home/panxiong/tecGPT-forecasting/src/models/tecGPT/gpt2")
+    parser.add_argument("--llm_layers_to_use", type=int, default=6)
+    parser.add_argument("--U_unfrozen_mha", type=int, default=2)
 
-    # --- Wandb 初始化 (可选, 用于记录评估结果) ---
-    # It might be part of a larger experiment, or a standalone evaluation run.
-    if cfg.wandb and cfg.wandb.project and cfg.get("log_evaluation_to_wandb", True):
-        run_name = cfg.wandb.get("name", None)
-        if run_name is None:
-            run_name = f"eval_{os.path.basename(os.getcwd())}"
-            if cfg.get("checkpoint_path"): 
-                 run_name += f"_{os.path.splitext(os.path.basename(cfg.checkpoint_path))[0]}"
+    return parser.parse_args()
 
-        wandb.init(
-            project=cfg.wandb.project,
-            entity=cfg.wandb.get("entity"),
-            name=run_name,
-            config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True),
-            dir=os.getcwd(),
-            job_type="evaluation", # Mark this run as an evaluation job
-            tags=cfg.wandb.get("tags", ["evaluation"]), 
-            mode=cfg.wandb.get("mode", "online")
-        )
-        logger.info(f"Wandb initialized for evaluation: project='{cfg.wandb.project}', run '{wandb.run.name}'")
-    else:
-        logger.info("Wandb not configured for evaluation or logging disabled. Skipping Wandb initialization.")
 
-    # --- 数据模块实例化 ---
-    logger.info(f"Instantiating DataModule <{cfg.data._target_}>")
-    datamodule: TECDataModule = hydra.utils.instantiate(cfg.data)
-    datamodule.prepare_data() # Checks for files
-    datamodule.setup(stage='test')  # Creates test dataset
-    
-    test_loader = datamodule.test_dataloader()
-    if test_loader is None:
-        logger.error("Test dataloader is None. Cannot proceed with evaluation.")
-        if wandb.run: wandb.finish(exit_code=1)
-        return
+def main():
+    args = parse_args()
 
-    # --- Scaler 实例化 ---
-    scaler_path = os.path.join(datamodule.processed_data_dir, cfg.data.scaler_filename)
-    if not os.path.isabs(scaler_path) and hydra.utils.get_original_cwd() != os.getcwd():
-        scaler_path_abs = os.path.join(hydra.utils.get_original_cwd(), scaler_path)
-        if os.path.exists(scaler_path_abs):
-            scaler_path = scaler_path_abs
-        else:
-            logger.warning(f"Scaler file not found at {scaler_path_abs}, trying {scaler_path}")
-            if not os.path.exists(scaler_path):
-                 logger.error(f"Scaler file not found at {scaler_path} or {scaler_path_abs}. Cannot proceed.")
-                 if wandb.run: wandb.finish(exit_code=1)
-                 return
-    try:
-        scaler = TecStandardScaler(scaler_path=scaler_path)
-        logger.info(f"Scaler loaded from {scaler_path}")
-    except Exception as e:
-        logger.error(f"Error loading scaler: {e}. Evaluation cannot proceed without scaler for metrics.")
-        if wandb.run: wandb.finish(exit_code=1)
-        return
+    print("=== 模型评估 ===")
+    print(f"模型路径: {args.model_path}")
+    print(f"数据目录: {args.data_dir}")
 
-    # --- 模型实例化 ---
-    # Model config should match the one used for training the checkpoint.
-    # It's good practice to save the config with the checkpoint, but here we rely on current cfg.model.
-    logger.info(f"Instantiating model <{cfg.model._target_}>")
-    model: ST_LLM = hydra.utils.instantiate(cfg.model, cfg=cfg) # Pass full cfg
+    # 设备配置
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    print(f"使用设备: {device}")
 
-    # --- Trainer 实例化 (主要用于加载 checkpoint 和使用 eval_epoch) ---
-    # We don't need train_loader or full optimizer/scheduler setup for evaluation.
-    # A subset of trainer config might be relevant (device, criterion for loss_scaled).
-    logger.info(f"Instantiating a lightweight trainer for evaluation purposes.")
-    # Create a minimal trainer config for evaluation context if needed
-    eval_trainer_cfg = cfg.trainer.copy() # Start with trainer config
-    # Override parts not needed for eval to avoid issues, e.g., optimizer params if model is frozen
-    # eval_trainer_cfg.optimizer_name = 'adamw' # Dummy, won't be used for steps
-    # eval_trainer_cfg.lr_scheduler_name = None
-
-    trainer = TecTrainer(
-        cfg=cfg, # Pass full cfg, trainer will pick what it needs
-        model=model,
-        test_loader=test_loader, # Pass test_loader here
-        scaler=scaler
-        # train_loader and val_loader can be None for evaluation only
+    # 加载数据
+    print("加载数据集...")
+    dataset_loaders = util.load_dataset(
+        dataset_dir=args.data_dir, scaler_path=args.scaler_path, batch_size=args.batch_size, target_device=str(device)
     )
-    
-    # --- 加载模型检查点 ---
-    checkpoint_path_to_load = cfg.get("checkpoint_path", None)
-    if not checkpoint_path_to_load:
-        logger.error("No checkpoint_path specified in config for evaluation. Cannot proceed.")
-        if wandb.run: wandb.finish(exit_code=1)
-        return
 
-    if not os.path.isabs(checkpoint_path_to_load):
-        original_cwd_ckpt_path = os.path.join(hydra.utils.get_original_cwd(), checkpoint_path_to_load)
-        if os.path.exists(original_cwd_ckpt_path):
-            checkpoint_path_to_load = original_cwd_ckpt_path
-        else:
-            logger.warning(f"Checkpoint {checkpoint_path_to_load} (rel to orig_cwd as {original_cwd_ckpt_path}) not found. Trying relative to hydra output dir.")
-            # If not found, it might be relative to hydra output dir. Check if exists.
-            if not os.path.exists(checkpoint_path_to_load):
-                logger.error(f"Checkpoint file not found at either {original_cwd_ckpt_path} or {checkpoint_path_to_load} (rel to hydra output dir). Cannot proceed.")
-                if wandb.run: wandb.finish(exit_code=1)
-                return
+    test_loader = dataset_loaders["test_loader"]
+    scaler = dataset_loaders["scaler"]
+    print(f"测试集批次数: {test_loader.num_batch}")
 
-    logger.info(f"Attempting to load checkpoint: {checkpoint_path_to_load}")
-    # Load checkpoint using trainer's method. Don't need optimizer/scheduler states for eval.
-    # The `load_checkpoint` method in TecTrainer should put model on the correct device.
-    trainer.load_checkpoint(checkpoint_path_to_load, load_optimizer_scheduler=False, load_config=cfg.get("load_config_from_checkpoint", False))
-    logger.info(f"Model loaded from checkpoint: {checkpoint_path_to_load}")
+    # 创建模型
+    print("创建模型...")
+    model = ST_LLM(
+        input_len=args.history_len,
+        output_len=args.forecast_len,
+        num_nodes=args.num_nodes,
+        tec_feat_dim=args.tec_feat_dim,
+        sw_feat_dim=args.sw_feat_dim,
+        time_feat_dim=args.time_feat_dim,
+        d_embed=args.d_embed,
+        d_llm=args.d_llm,
+        llm_model_local_path=args.local_gpt2_path,
+        llm_layers_to_use=args.llm_layers_to_use,
+        U_unfrozen_mha=args.U_unfrozen_mha,
+        device=str(device),
+    ).to(device)
 
-    # --- 执行评估 ---
-    logger.info("Starting evaluation on the test set...")
-    # The evaluate_on_test method in TecTrainer uses its self.test_loader and self.scaler
-    # It calls eval_epoch internally.
-    test_metrics = trainer.evaluate_on_test(checkpoint_path=None) # Checkpoint already loaded
-    
-    logger.info("--- Test Set Evaluation Metrics ---")
-    for metric_name, metric_value in test_metrics.items():
-        logger.info(f"  {metric_name}: {metric_value:.4f}")
-    logger.info("-----------------------------------")
+    # 加载模型权重
+    print(f"加载模型权重: {args.model_path}")
+    model.load_state_dict(torch.load(args.model_path, map_location=device))
+    model.eval()
 
-    # --- (可选) 保存评估结果 ---
-    # Results are already logged to console and Wandb (if enabled).
-    # Could also save to a JSON/YAML file in the output directory.
-    output_metrics_file = os.path.join(os.getcwd(), "test_metrics.yaml")
-    try:
-        with open(output_metrics_file, 'w') as f:
-            OmegaConf.save(config=OmegaConf.create(test_metrics), f=f)
-        logger.info(f"Test metrics saved to: {output_metrics_file}")
-    except Exception as e:
-        logger.error(f"Failed to save test metrics to file: {e}")
+    # 评估
+    print("开始评估...")
+    test_predictions_all_horizons = [[] for _ in range(args.forecast_len)]
+    test_targets_all_horizons = [[] for _ in range(args.forecast_len)]
 
-    if wandb.run:
-        wandb.finish()
+    with torch.no_grad():
+        for batch_x, batch_y_raw in tqdm(test_loader.get_iterator(), desc="评估"):
+            batch_x = torch.FloatTensor(batch_x).to(device)
+            batch_y_raw = torch.FloatTensor(batch_y_raw).to(device)
 
-    logger.info("Evaluation script finished.")
+            pred_scaled = model(batch_x)  # [B, N, S]
+            pred_raw = scaler.inverse_transform_tec(pred_scaled)  # [B, N, S]
+            target_raw = batch_y_raw.squeeze(-1).permute(0, 2, 1)  # [B, N, S]
+
+            for s_idx in range(args.forecast_len):
+                test_predictions_all_horizons[s_idx].append(pred_raw[:, :, s_idx].cpu())
+                test_targets_all_horizons[s_idx].append(target_raw[:, :, s_idx].cpu())
+
+    # 计算指标
+    print("\n=== 评估结果 ===")
+    test_results_per_horizon = []
+
+    for s_idx in range(args.forecast_len):
+        preds_h = torch.cat(test_predictions_all_horizons[s_idx], dim=0)
+        targets_h = torch.cat(test_targets_all_horizons[s_idx], dim=0)
+
+        m_test = util.metric(preds_h, targets_h)
+        horizon_results = {"horizon": s_idx + 1, "mae": m_test[0], "mape": m_test[1], "rmse": m_test[2], "wmape": m_test[3]}
+        test_results_per_horizon.append(horizon_results)
+        print(f"Horizon {s_idx+1:02d} - MAE: {m_test[0]:.4f}, RMSE: {m_test[2]:.4f}, MAPE: {m_test[1]:.2f}%, WMAPE: {m_test[3]:.2f}%")
+
+    # 保存结果
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    df_results = pd.DataFrame(test_results_per_horizon)
+    result_path = os.path.join(args.output_dir, "evaluation_results.csv")
+    df_results.to_csv(result_path, index=False)
+    print(f"\n详细结果已保存到: {result_path}")
+
+    # 总结
+    avg_metrics = df_results.drop(columns=["horizon"]).mean()
+    print("\n=== 平均指标 ===")
+    print(f"平均 MAE:   {avg_metrics['mae']:.4f}")
+    print(f"平均 RMSE:  {avg_metrics['rmse']:.4f}")
+    print(f"平均 MAPE:  {avg_metrics['mape']:.2f}%")
+    print(f"平均 WMAPE: {avg_metrics['wmape']:.2f}%")
+
 
 if __name__ == "__main__":
-    # 运行: python src/evaluate.py checkpoint_path=/path/to/your/model.ckpt [other overrides]
-    main() 
+    main()

@@ -18,7 +18,7 @@ class ST_LLM(nn.Module):
         time_feat_dim: int = 6,
         d_embed: int = 128,
         d_llm: int = 768,
-        llm_model_local_path: str = "/home/panxiong/tecGPT-forecasting/src/models/TEC-LLM/gpt2",  # 默认路径
+        llm_model_local_path: str = "/home/panxiong/tecGPT-forecasting/src/models/tecGPT/gpt2",  # 更新默认路径
         llm_layers_to_use: int = 6,
         U_unfrozen_mha: int = 2,
         dropout_embed: float = 0.1,

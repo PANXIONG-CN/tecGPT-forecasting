@@ -1,319 +1,461 @@
 # tecGPT-forecasting
 
-**tecGPT-forecasting** 是一个旨在利用预训练语言模型 (LLM)，特别是基于 GPT-2 架构的模型，进行高分辨率区域电离层总电子含量 (Total Electron Content, TEC) 时空预测的科研项目。项目采用了部分冻结注意力 (Partial Freezing Attention, PFA) 策略以高效微调 LLM，并设计了专门的嵌入模块来处理多样化的输入数据，包括历史TEC图、空间天气指数和时间特征。
-
-本项目使用 [Hydra](https://hydra.cc/) 进行配置管理，[Weights & Biases (Wandb)](https://wandb.ai/) 进行实验跟踪和可视化，并集成 [Optuna](https://optuna.org/) 进行超参数调优。代码采用 PyTorch 框架实现，并提供了 Docker 环境以确保可复现性。
+**tecGPT-forecasting** 是一个基于预训练大语言模型(LLM)进行高分辨率区域电离层总电子含量(TEC)时空预测的深度学习项目。项目采用GPT-2作为核心架构，通过部分冻结注意力(PFA)策略进行高效微调，并设计了专门的嵌入模块来处理多模态输入数据。
 
 ## 特性
 
-*   **基于 LLM 的时空预测**: 使用 GPT-2 作为核心，将空间格点视为 Token 进行序列预测。
-*   **部分冻结注意力 (PFA)**: 高效微调 LLM 的策略，平衡性能与计算资源。
-    *   冻结 LLM 的前 F 层 (MHA+FFN，LayerNorm 可选可训练)。
-    *   解冻后 U 层的 MHA 和 LayerNorm，但保持这些层的 MLP (FFN) 部分冻结。
-*   **专用嵌入模块**:
-    *   `TecHistoryEmbedding`: 处理各节点的历史TEC序列。
-    *   `TimeFeatureEmbedding`: 处理周期编码的时间特征。
-    *   `SpatialEmbedding`: 基于格点经纬度索引的可学习空间嵌入。
-    *   `SpaceWeatherEmbedding`: 处理历史空间天气指数。
-    *   `FusionLayer`: 将上述异构嵌入融合为 LLM 的输入。
-*   **端到端数据处理**:
-    *   从年度 HDF5 文件加载原始数据 (`/ionosphere/TEC`, `/coordinates/*`, `/space_weather_indices/*`)。
-    *   预处理脚本 (`preprocess_hdf5.py`) 执行特征工程 (Kp 指数缩放, F10.7 对数转换, 周期时间编码)、数据标准化 (节点级TEC，特征级SW指数) 并保存缩放器 (`scaler.pkl`)，最后生成滑动窗口样本。
-    *   输出 `train.npz`, `val.npz`, `test.npz` 文件，格式为 `X: [Num_Samples, P, N_nodes, C_in]`, `Y: [Num_Samples, S, N_nodes, 1]`。
-*   **灵活的实验管理**:
-    *   **Hydra**: 用于全面的配置管理 (数据、模型、训练器、日志等)。
-    *   **Wandb**: 集成用于实验跟踪、日志记录和可视化。
-    *   **Optuna**: 通过 Hydra 插件进行超参数优化。
-*   **标准化训练与评估流程**:
-    *   `train.py`: Hydra 驱动的训练脚本。
-    *   `evaluate.py`: Hydra 驱动的评估脚本，加载检查点在测试集上评估。
-    *   `tune.py`: Hydra 驱动的超参数调优脚本。
-    *   `TecTrainer`: 封装训练和评估的核心逻辑，包括早停、模型检查点保存、指标计算等。
-*   **可复现环境**:
-    *   `environment.yaml`: Conda 环境定义。
-    *   `requirements.txt`: Pip 依赖列表。
-    *   `Dockerfile` 和 `.dockerignore`: 用于构建 Docker 镜像。
+### 🚀 核心功能
+- **基于LLM的时空预测**: 使用GPT-2作为骨干网络，将空间格点视为Token进行序列预测
+- **部分冻结注意力(PFA)**: 高效的LLM微调策略，平衡性能与计算资源
+- **多模态数据融合**: 整合历史TEC数据、空间天气指数和时间特征
+- **端到端数据处理**: 从原始HDF5文件到模型训练的完整流程
+
+### 🧠 模型架构
+- **ST_LLM(tecGPT)**: 主模型类，整合多种嵌入层和PFA-GPT2
+- **专用嵌入模块**:
+  - `TecHistoryEmbedding`: 处理历史TEC序列
+  - `TimeFeatureEmbedding`: 处理周期性时间特征
+  - `SpatialEmbedding`: 基于格点位置的空间嵌入
+  - `SpaceWeatherEmbedding`: 处理空间天气指数
+  - `FusionLayer`: 多模态特征融合层
+
+### 📊 实验管理
+- **Weights & Biases集成**: 完整的实验跟踪和可视化
+- **Optuna超参数优化**: 自动化超参数搜索
+- **分布式训练支持**: 支持多GPU分布式训练(DDP)
+- **混合精度训练**: 提高训练效率，减少显存占用
+
+### 🔧 工程特性
+- **模块化设计**: 可扩展的模型注册机制，便于添加新模型
+- **标准化数据处理**: 统一的数据预处理和缩放流程
+- **灵活的训练配置**: 支持命令行参数调整
+- **完善的评估体系**: 多种评估指标和可视化
 
 ## 目录结构
 
 ```
 tecGPT-forecasting/
 │
-├── conf/                     # Hydra 配置文件
-│   ├── config.yaml           # 主配置文件
-│   ├── data/default.yaml     # 数据处理与加载配置
-│   ├── model/tec_gpt.yaml    # 模型结构与参数配置
-│   ├── trainer/default.yaml  # 训练器参数配置
-│   ├── hydra/                # Hydra 内部组件配置 (如日志)
-│   └── tune.yaml             # Optuna 超参数调优配置
+├── data_preparation/         # 数据预处理
+│   ├── preprocess_data.py    # 统一的数据预处理脚本
+│   └── *.hdf5               # 原始HDF5数据文件
 │
-├── data_preparation/         # HDF5 原始数据预处理脚本
-│   └── preprocess_hdf5.py
-│   └── (示例 HDF5 数据可放于此或外部指定路径)
+├── processed_tec_data/       # 预处理后的数据
+│   ├── train.npz            # 训练集
+│   ├── val.npz              # 验证集  
+│   ├── test.npz             # 测试集
+│   └── scaler.pkl           # 数据缩放器
 │
-├── processed_data/           # 预处理后的 .npz 数据和 scaler.pkl (被 .gitignore 忽略)
-│
-├── src/                      # 项目源代码
-│   ├── datasets/             # PyTorch Dataset 和 DataModule
-│   │   └── tec_dataset.py
-│   ├── models/               # 模型定义
+├── src/                      # 源代码
+│   ├── models/              # 模型定义
+│   │   ├── __init__.py      # 模型注册机制
+│   │   └── tecGPT/          # tecGPT模型
+│   │       ├── __init__.py
+│   │       ├── tec_gpt.py   # 主模型类
+│   │       ├── pfa_llm.py   # PFA-GPT2实现
+│   │       ├── embeddings.py # 嵌入层定义
+│   │       └── gpt2/        # GPT-2预训练模型文件
+│   │
+│   ├── utils/               # 工具函数
 │   │   ├── __init__.py
-│   │   ├── tec_gpt.py        # TecGPT 主模型 (ST_LLM)
-│   │   ├── embeddings.py     # 各种嵌入层
-│   │   └── pfa_llm.py        # PFA-GPT2 实现
-│   ├── trainers/             # 训练器类
-│   │   └── tec_trainer.py
-│   ├── utils/                # 辅助工具、指标、缩放器等
-│   │   ├── __init__.py
-│   │   ├── scaler.py         # 数据缩放器 (用于逆转换)
-│   │   ├── metrics.py        # 评估指标函数
-│   │   └── helpers.py        # 通用辅助函数 (如 seed_everything)
-│   ├── train.py              # 主训练脚本
-│   ├── evaluate.py           # 主评估脚本
-│   └── tune.py               # 主超参数调优脚本
+│   │   └── util.py          # 数据处理和评估工具
+│   │
+│   ├── tec_train.py         # 主训练脚本
+│   ├── evaluate.py          # 模型评估脚本
+│   └── ranger21.py          # Ranger优化器实现
 │
-├── outputs/                  # Hydra 默认输出目录 (被 .gitignore 忽略)
-├── multirun/                 # Hydra 多重运行输出目录 (被 .gitignore 忽略)
-├── wandb/                    # Wandb 本地文件 (被 .gitignore 忽略)
-├── gpt2_cache_docker/        # Dockerfile 中预下载模型的缓存 (可选, 被 .gitignore 忽略)
+├── logs/                     # 训练日志和模型检查点
+├── wandb/                    # Weights & Biases本地文件
+├── eval_results/             # 评估结果输出
 │
-├── README.md                 # 本文件
-├── environment.yaml          # Conda 环境描述文件
-├── requirements.txt          # Pip 需求列表
-├── Dockerfile                # Docker 镜像定义
-├── .dockerignore             # Docker 构建时忽略的文件
-├── .gitignore                # Git 版本控制忽略的文件
-└── LICENSE                   # 项目许可证
+├── README.md                 # 项目说明文档
+├── requirements.txt          # Python依赖
+├── .gitignore               # Git忽略文件
+└── LICENSE                  # 开源协议
 ```
 
-## 安装与设置
+## 快速开始
 
-### 1. Conda 环境 (推荐)
-
-建议使用 Conda 创建和管理项目环境：
+### 1. 环境安装
 
 ```bash
-# 从 environment.yaml 创建 conda 环境
-conda env create -f environment.yaml
+# 克隆仓库
+git clone https://github.com/your-username/tecGPT-forecasting.git
+cd tecGPT-forecasting
 
-# 激活环境
-conda activate tecgpt
-```
-
-### 2. Pip 依赖
-
-如果不使用 Conda，可以先创建虚拟环境，然后通过 `pip` 安装依赖：
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Linux/macOS
-# .venv\Scripts\activate  # Windows
-
-pip install --upgrade pip
+# 安装依赖
 pip install -r requirements.txt
 ```
 
-### 3. Docker 环境
+### 2. 数据准备
 
-项目提供了 `Dockerfile` 用于构建可复现的 Docker 镜像：
+#### 2.1 原始数据格式
 
-```bash
-# 构建 Docker 镜像 (在项目根目录下运行)
-docker build -t tecgpt-forecasting .
-
-# 运行 Docker 容器 (示例)
-# docker run -it --rm \
-#   -v $(pwd)/conf:/app/conf \          # 挂载配置文件
-#   -v $(pwd)/processed_data:/app/processed_data \  # 挂载处理后的数据
-#   -v $(pwd)/data_preparation/your_hdf5_data:/app/raw_data \ # 挂载原始HDF5数据 (如果需要预处理)
-#   -v $(pwd)/outputs:/app/outputs \      # 挂载输出目录
-#   --gpus all \                         # 如果使用 GPU
-#   tecgpt-forecasting \
-#   python src/train.py data.raw_data_dir=/app/raw_data # 示例：运行训练，并覆盖原始数据路径
+项目使用的原始数据为HDF5格式文件，命名规则为：
 ```
-**注意**: Dockerfile 中的路径和挂载卷需要根据你的实际使用情况进行调整，特别是数据路径和模型缓存路径 (`gpt2_cache_docker`)。
-
-## 数据准备
-
-### 1. 数据源
-
-*   原始数据以年度 HDF5 文件的形式提供。
-*   每个 HDF5 文件应包含：
-    *   TEC 数据: `/ionosphere/TEC` (形状 `[N_times, 41, 71]`, 通常 `N_times=1` 代表单个时间点)
-    *   时间坐标: `/coordinates/{year, month, day, hour, day_of_year}` (标量)
-    *   空间天气指数: `/space_weather_indices/{Kp_Index, Dst_Index, AE_Index, f107_Index, Ap_Index}` (标量)
-*   时间分辨率：假设为 2 小时。
-
-### 2. 预处理脚本 (`data_preparation/preprocess_hdf5.py`)
-
-此脚本负责将原始 HDF5 数据转换为模型训练所需的格式。
-
-**主要步骤**:
-
-1.  **加载数据**: 从指定的年度 HDF5 文件中加载 TEC、时间和空间天气数据。
-2.  **特征工程**:
-    *   Kp 指数乘以 0.1。
-    *   F10.7 指数取 log10。
-    *   生成周期性时间特征 (小时、星期几、年积日的 sin/cos 编码，共6个)。
-3.  **数据标准化**:
-    *   **TEC 数据**: 对每个空间格点 (node) 的 TEC 值，使用训练集 (2013-2019) 计算均值和标准差，并进行 z-score 标准化。
-    *   **空间天气指数**: 对每个空间天气指数，使用训练集计算均值和标准差，并进行 z-score 标准化。
-    *   所有缩放器参数 (均值、标准差) 保存到 `scaler.pkl` 文件中。
-4.  **样本生成**:
-    *   使用滑动窗口方法创建输入序列 (X) 和目标序列 (Y)。
-    *   **输入 X**: 包含历史 P 步的标准化后的 TEC (1维)、标准化后的空间天气指数 (5维)、周期编码的时间特征 (6维)。总共12个输入特征。形状为 `[Num_Samples, P, N_nodes, C_in=12]`。
-    *   **输出 Y**: 包含未来 S 步的**原始尺度**的 TEC 值。形状为 `[Num_Samples, S, N_nodes, 1]`。
-5.  **数据划分与保存**:
-    *   数据集划分: Train (2013-2019), Val (2020-2021), Test (2022-2025.4)。
-    *   将处理好的数据分别保存为 `train.npz`, `val.npz`, `test.npz` 到 `processed_data/` 目录。
-
-**运行预处理**:
-
-在运行脚本前，需要修改 `data_preparation/preprocess_hdf5.py` 文件底部的 `example_config` 中的以下路径：
-*   `data_root_dir`: 指向你的 HDF5 文件存放的根目录。HDF5 文件应按年份存放在子目录中 (例如 `your_hdf5_data/2013/file.hdf5`)，或者脚本中的文件查找逻辑需要根据你的实际情况调整。
-*   `output_dir`: 指定预处理后的 `.npz` 文件和 `scaler.pkl` 的保存位置 (通常是 `tecGPT-forecasting/processed_data/`)。
-
-```bash
-# 切换到 data_preparation 目录
-cd data_preparation
-
-# 运行预处理脚本
-python preprocess_hdf5.py
-```
-脚本中包含生成虚拟 HDF5 数据的逻辑，如果找不到真实的 HDF5 文件，它会尝试创建一些用于测试。请确保检查日志输出以确认数据加载和处理是否符合预期。
-
-## 配置管理 (Hydra)
-
-本项目使用 [Hydra](https://hydra.cc/) 进行配置管理。
-
-*   所有配置文件都位于 `conf/` 目录下。
-*   `conf/config.yaml` 是主配置文件，它通过 `defaults` 列表组合了数据、模型和训练器的配置。
-*   各个组件的详细配置在对应的 YAML 文件中：
-    *   `conf/data/default.yaml`: 数据集参数、路径、P/S 窗口大小等。
-    *   `conf/model/tec_gpt.yaml`: 模型架构参数、嵌入维度、LLM配置等。
-    *   `conf/trainer/default.yaml`: 训练参数、优化器、学习率调度器、早停、检查点等。
-*   **覆盖配置**: 可以在命令行中轻松覆盖任何配置参数。例如：
-    ```bash
-    python src/train.py trainer.epochs=50 data.batch_size=16 model.llm_config.f_layers_to_freeze=4
-    ```
-
-## 训练模型
-
-### 脚本: `src/train.py`
-
-主训练脚本通过 Hydra 加载配置，实例化数据模块、模型、缩放器和训练器，然后启动训练过程。
-
-### 运行训练
-
-在项目根目录下运行：
-
-```bash
-python src/train.py [配置覆盖参数...]
-```
-例如，训练10个 epoch，并指定一个 Wandb 实体：
-```bash
-python src/train.py trainer.epochs=10 wandb.entity="your_wandb_username_or_team"
+CRIM_SW2hr_AI_v1.2_{YEAR}_DataDrivenRange_CN.hdf5
 ```
 
-### 特性
+每个HDF5文件包含以下数据结构：
 
-*   **Wandb 集成**: 自动记录配置、训练/验证损失、指标和学习率到 Weights & Biases。
-*   **检查点**:
-    *   自动保存在 Hydra 输出目录的 `checkpoints/` 子目录下。
-    *   保存最新的检查点 (`...-last.ckpt`)。
-    *   根据验证集上的监控指标保存 top-k 最佳检查点。
-*   **从检查点恢复训练**:
-    ```bash
-    python src/train.py resume_from_checkpoint=/path/to/your/checkpoint.ckpt
-    # 或者，如果检查点在之前的 outputs 目录中：
-    # python src/train.py resume_from_checkpoint=outputs/YYYY-MM-DD/HH-MM-SS/checkpoints/model-last.ckpt
-    ```
-*   **早停**: 如果验证集上的指标在一定 epoch 内没有改善，则提前停止训练。
+**电离层数据**:
+- `/ionosphere/TEC`: 总电子含量数据 [时间, 纬度, 经度]
+  - 形状: `[T, 41, 71]` (时间步数 × 纬度网格 × 经度网格)
+  - 单位: TECU (Total Electron Content Units)
+  - 填充值: -9999.0 (表示缺失数据)
 
-## 评估模型
+**坐标信息**:
+- `/coordinates/year`: 年份
+- `/coordinates/month`: 月份  
+- `/coordinates/day`: 日期
+- `/coordinates/hour`: 小时 (偶数小时: 0, 2, 4, ..., 22)
+- `/coordinates/day_of_year`: 年积日
 
-### 脚本: `src/evaluate.py`
+**空间天气指数**:
+- `/space_weather_indices/Kp_Index`: Kp指数 (地磁活动)
+- `/space_weather_indices/Dst_Index`: Dst指数 (环电流强度)
+- `/space_weather_indices/ap_Index`: ap指数 (地磁活动)
+- `/space_weather_indices/F107_Index`: F10.7指数 (太阳射电流量)
+- `/space_weather_indices/AE_Index`: AE指数 (极光电急流)
 
-主评估脚本用于加载训练好的模型检查点，并在测试集上评估其性能。
+#### 2.2 数据预处理流程
 
-### 运行评估
-
-在项目根目录下运行，并指定要评估的检查点路径：
-
-```bash
-python src/evaluate.py checkpoint_path=/path/to/your/model-best.ckpt [配置覆盖参数...]
-```
-例如：
-```bash
-python src/evaluate.py checkpoint_path=outputs/some_run_dir/checkpoints/tecllm-epoch=XX-...ckpt wandb.entity="your_entity"
-```
-
-### 特性
-
-*   加载指定的模型检查点。
-*   在测试集上计算以下指标 (均在原始物理尺度上)：
-    *   MAE (Mean Absolute Error)
-    *   RMSE (Root Mean Squared Error)
-    *   WMAPE (Weighted Mean Absolute Percentage Error)
-    *   R² (R-squared / Coefficient of Determination)
-    *   可选的逐预测步长 (per-step) MAE 和 RMSE。
-*   将评估结果打印到控制台，保存到 Hydra 输出目录下的 `test_metrics.yaml`，并可选地记录到 Wandb。
-
-## 超参数优化 (Optuna)
-
-### 脚本: `src/tune.py` 和 `conf/tune.yaml`
-
-项目集成了 Optuna 用于超参数优化 (HPO)，通过 `hydra-optuna-sweeper` 插件。
-
-*   `conf/tune.yaml`: 定义 Optuna sweeper 的配置 (如优化方向、试验次数、采样器、剪枝器) 以及要调优的超参数及其范围/选择。
-*   `src/tune.py`: 包含 Optuna 的 `objective` 函数，该函数会为每一组超参数组合运行一次训练 (可能是缩短版)，并返回要优化的指标。
-
-### 运行超参数优化
-
-要启动 HPO sweep，请使用 `-m` (multirun) 标志运行 `src/tune.py`：
+将原始HDF5文件放入 `data_preparation/` 目录，然后运行统一的数据预处理脚本：
 
 ```bash
-python src/tune.py -m [配置覆盖参数...]
+python data_preparation/preprocess_data.py --hdf5_dir data_preparation --output_dir ./processed_tec_data
 ```
-例如，运行20次试验，每次试验训练3个 epoch：
+
+**预处理步骤详解**:
+
+1. **数据加载与质量控制**:
+   - 从HDF5文件中提取TEC数据和元数据
+   - 识别并标记填充值(-9999.0)
+   - 对F10.7指数进行对数变换: `log10(max(F107, 1e-6))`
+   - 使用前向填充和后向填充处理空间天气指数的缺失值
+
+2. **特征工程**:
+   
+   **时间特征生成**:
+   - 小时周期性编码: `sin(2π * hour / 24)`, `cos(2π * hour / 24)`
+   - 星期周期性编码: `sin(2π * dayofweek / 7)`, `cos(2π * dayofweek / 7)`  
+   - 年积日周期性编码: `sin(2π * dayofyear / days_in_year)`, `cos(2π * dayofyear / days_in_year)`
+
+   **空间天气特征**:
+   - Kp指数: 应用比例因子 (通常为0.1)
+   - Dst, ap, AE指数: 保持原始值
+   - F10.7指数: 对数变换后的值
+
+3. **数据标准化**:
+   
+   **TEC数据 (节点级标准化)**:
+   - 每个空间节点独立计算均值和标准差
+   - 公式: `TEC_scaled = (TEC - mean_node) / std_node`
+   - 只使用训练集数据计算标准化参数
+
+   **空间天气数据 (特征级标准化)**:
+   - 每个空间天气指数独立标准化
+   - 公式: `SW_scaled = (SW - mean_feature) / std_feature`
+
+4. **滑动窗口序列生成**:
+   - 历史长度: P = 12 (24小时，每2小时一个点)
+   - 预测长度: S = 12 (未来24小时)
+   - 序列重叠生成，最大化数据利用率
+
+5. **数据集划分**:
+   - 训练集: 2013-2019年
+   - 验证集: 2020-2021年  
+   - 测试集: 2022-2025年
+
+**输出数据格式**:
+- X (输入): `[样本数, P=12, N=2911, C=12]`
+  - C=12 特征: [1个TEC + 5个空间天气指数 + 6个时间特征]
+- Y (目标): `[样本数, S=12, N=2911, 1]`
+  - 原始尺度的TEC值，用于损失计算
+- scaler.pkl: 包含标准化参数的文件
+
+### 3. tecGPT模型架构与训练过程
+
+#### 3.1 模型架构详解
+
+tecGPT采用多模态嵌入 + PFA-GPT2 + 预测头的架构：
+
+```
+输入: [B, P=12, N=2911, C=12]
+│
+├── TEC历史嵌入 ────────── TecHistoryEmbedding([B, P, N] → [B, N, D])
+├── 空间天气嵌入 ────────── SpaceWeatherEmbedding([B, P, 5] → [B, N, D])  
+├── 时间特征嵌入 ────────── TimeFeatureEmbedding([B, P, 6] → [B, N, D])
+└── 空间位置嵌入 ────────── SpatialEmbedding(网格坐标 → [1, N, D])
+│
+多模态融合层 ──────────── FusionLayer([B, N, 4*D] → [B, N, 768])
+│
+PFA-GPT2 ─────────────── GPT-2 with Partial Frozen Attention
+│                         [B, N, 768] → [B, N, 768]
+│
+预测头 ──────────────── Linear层 ([B, N, 768] → [B, N, S=12])
+│
+输出: [B, N=2911, S=12]
+```
+
+**各模块详细说明**:
+
+1. **TecHistoryEmbedding**:
+   - 输入: 标准化后的历史TEC序列 `[B, P, N]`
+   - 处理: MLP投影 `P → D_embed`
+   - 输出: `[B, N, D_embed]`
+
+2. **SpaceWeatherEmbedding**:  
+   - 输入: 历史空间天气指数 `[B, P, 5]`
+   - 处理: 展平为 `[B, P*5]`，然后MLP投影，广播到所有节点
+   - 输出: `[B, N, D_embed]`
+
+3. **TimeFeatureEmbedding**:
+   - 输入: 周期性时间特征 `[B, P, 6]` 
+   - 处理: 取最后时刻特征 `[B, 6]`，MLP投影，广播到所有节点
+   - 输出: `[B, N, D_embed]`
+
+4. **SpatialEmbedding**:
+   - 输入: 网格坐标(预定义)
+   - 处理: 纬度/经度Embedding查表 + MLP投影
+   - 输出: `[1, N, D_embed]` (批次间共享)
+
+5. **FusionLayer**:
+   - 输入: 连接所有嵌入 `[B, N, 4*D_embed]`
+   - 处理: MLP投影到GPT-2维度
+   - 输出: `[B, N, 768]`
+
+6. **PFA-GPT2**:
+   - 加载预训练GPT-2模型
+   - 替换位置嵌入层适应2911个节点
+   - 应用部分冻结注意力策略:
+     - 冻结前(L-U)层的MLP和注意力权重
+     - 保持所有LayerNorm可训练
+     - 解冻后U层的注意力机制
+   - 支持梯度检查点减少显存
+
+7. **预测头**:
+   - 输入: `[B, N, 768]`
+   - 处理: Linear(768 → 384) + GELU + LayerNorm + Dropout + Linear(384 → S)  
+   - 输出: `[B, N, S]` (标准化尺度)
+
+#### 3.2 训练过程
+
+**数据流程**:
+```
+原始HDF5 → 预处理 → NPZ文件 → DataLoader → 模型训练
+```
+
+**训练配置**:
+- 损失函数: MAE (在原始尺度计算)
+- 优化器: AdamW / Ranger21 (支持梯度中心化)
+- 学习率调度: ReduceLROnPlateau  
+- 早停策略: 验证集MAE无改善时停止
+- 混合精度训练: 自动启用以节省显存
+- 梯度裁剪: 防止梯度爆炸
+
+**训练流程**:
+1. 加载预处理数据和标准化器
+2. 初始化tecGPT模型，应用PFA策略
+3. 每个epoch:
+   - 训练阶段: 前向传播 → 逆标准化 → 损失计算 → 反向传播
+   - 验证阶段: 评估所有指标 (MAE, RMSE, MAPE, WMAPE)
+   - 保存最佳模型 (基于验证MAE)
+4. 测试评估: 逐时间步预测并计算分层指标
+
+### 4. 模型训练
+
+#### 基础训练
 ```bash
-python src/tune.py -m hydra.sweeper.n_trials=20 trainer.epochs=3 wandb.entity="your_entity"
+# 使用默认参数训练
+python src/tec_train.py
+
+# 自定义参数训练
+python src/tec_train.py --epochs 50 --batch_size 16 --learning_rate 1e-4 --use_wandb
 ```
 
-### 特性
+#### 分布式训练
+```bash
+# 双GPU训练
+python src/tec_train.py --use_ddp --world_size 2 --use_amp
+```
 
-*   与 Hydra 无缝集成。
-*   支持 Optuna 的各种采样器和剪枝器。
-*   可以将整个 sweep 或每个 trial 的结果记录到 Wandb。
+#### 超参数优化
+```bash
+# 使用Optuna进行超参数搜索
+python src/tec_train.py --use_optuna --optuna_trials 20 --use_wandb
+```
 
-## 核心代码模块
+### 5. 模型评估
 
-*   **`src/models/`**:
-    *   `tec_gpt.py`: 定义了 `ST_LLM` (TecGPT) 主模型类，整合了所有嵌入层、PFA-LLM 和预测头。
-    *   `pfa_llm.py`: 实现了 `PFA_GPT2` 类，应用部分冻结注意力策略到 `transformers` GPT-2 模型。
-    *   `embeddings.py`: 包含所有自定义的嵌入模块 (`TecHistoryEmbedding`, `TimeFeatureEmbedding`, `SpatialEmbedding`, `SpaceWeatherEmbedding`, `FusionLayer`)。
-*   **`src/datasets/tec_dataset.py`**:
-    *   `TECDataset`: PyTorch `Dataset` 类，用于加载 `preprocess_hdf5.py` 生成的 `.npz` 文件。
-    *   `TECDataModule`: 组织数据加载、准备和提供 `DataLoader`。
-*   **`src/trainers/tec_trainer.py`**:
-    *   `TecTrainer`: 封装了完整的训练、验证和测试循环，包括优化器/调度器配置、损失计算、指标计算 (处理尺度转换)、检查点保存、早停和 Wandb 日志记录。
-*   **`src/utils/`**:
-    *   `scaler.py`: `StandardScaler` 类，用于从 `scaler.pkl` 加载参数并对模型输出进行逆转换以评估指标。
-    *   `metrics.py`: 实现各种评估指标 (MAE, RMSE, WMAPE, R²) 的 PyTorch 函数，支持掩码。
-    *   `helpers.py`: 包含通用辅助函数，如 `seed_everything()` 和 `get_device()`。
+```bash
+# 评估训练好的模型
+python src/evaluate.py --model_path logs/tecGPT_YYYYMMDD-HHMMSS/best_model.pth
+```
 
-## 待办事项 / 未来工作
+## 详细配置
 
-*   [ ] 针对特定区域或事件优化模型配置。
-*   [ ] 探索更高级的 LLM 架构或微调策略。
-*   [ ] 实现更复杂的空间天气指数或地磁活动特征的嵌入方式。
-*   [ ] 扩展到全球 TEC 预测。
-*   [ ] 添加更详细的预测结果可视化。
+### 模型参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--model_name` | tecGPT | 模型类型选择 |
+| `--d_embed` | 128 | 嵌入维度 |
+| `--d_llm` | 768 | LLM隐藏维度 |
+| `--llm_layers_to_use` | 6 | 使用的GPT层数 |
+| `--U_unfrozen_mha` | 2 | 解冻的注意力层数 |
+| `--dropout_embed` | 0.1 | 嵌入层dropout |
+| `--dropout_llm_out` | 0.1 | LLM输出dropout |
+
+### 训练参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--batch_size` | 16 | 批次大小 |
+| `--learning_rate` | 5e-5 | 学习率 |
+| `--epochs` | 100 | 训练轮数 |
+| `--patience` | 20 | 早停耐心值 |
+| `--optimizer_type` | AdamW | 优化器类型 |
+| `--weight_decay` | 0.01 | 权重衰减 |
+| `--clip_grad_norm` | 1.0 | 梯度裁剪 |
+
+### 数据参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--history_len` | 12 | 输入序列长度 |
+| `--forecast_len` | 12 | 预测序列长度 |
+| `--num_nodes` | 2911 | 空间节点数(41×71) |
+| `--tec_feat_dim` | 1 | TEC特征维度 |
+| `--sw_feat_dim` | 5 | 空间天气特征维度 |
+| `--time_feat_dim` | 6 | 时间特征维度 |
+
+## 实验管理
+
+### Weights & Biases
+
+启用wandb进行实验跟踪：
+
+```bash
+# 基础wandb使用
+python src/tec_train.py --use_wandb --wandb_project "your-project" --wandb_entity "your-entity"
+
+# 设置实验组
+python src/tec_train.py --use_wandb --wandb_group "experiment_group_1"
+```
+
+### Optuna超参数优化
+
+```bash
+# 使用SQLite存储优化历史
+python src/tec_train.py --use_optuna --optuna_storage "sqlite:///optuna.db" --optuna_trials 50
+
+# 自定义study名称
+python src/tec_train.py --use_optuna --optuna_study_name "tecGPT_optimization_v1"
+```
+
+## 性能优化
+
+### 内存优化
+- **梯度检查点**: 自动启用以减少GPU内存使用
+- **混合精度训练**: 使用`--use_amp`参数
+- **批次大小调整**: 根据GPU内存自动调整
+
+### 训练加速
+- **分布式训练**: 支持多GPU DDP训练
+- **数据并行**: 高效的数据加载和预处理
+- **模型并行**: PFA策略减少可训练参数
+
+## 模型扩展
+
+### 添加新模型
+
+1. 在`src/models/`下创建新的模型目录
+2. 实现模型类并继承相应的基类
+3. 在`src/models/__init__.py`中注册新模型：
+
+```python
+# 在MODEL_REGISTRY中添加新模型
+MODEL_REGISTRY = {
+    'tecGPT': ST_LLM,
+    'your_new_model': YourNewModel,  # 新增
+}
+```
+
+4. 在`tec_train.py`的`create_model`函数中添加模型创建逻辑
+
+### 自定义损失函数
+
+在`utils/util.py`中定义新的损失函数，并在训练脚本中引用。
+
+## 评估指标
+
+项目支持多种评估指标：
+
+- **MAE** (Mean Absolute Error): 平均绝对误差
+- **RMSE** (Root Mean Squared Error): 均方根误差  
+- **MAPE** (Mean Absolute Percentage Error): 平均绝对百分比误差
+- **WMAPE** (Weighted Mean Absolute Percentage Error): 加权平均绝对百分比误差
+
+所有指标都在原始物理量纲上计算，确保结果的可解释性。
+
+## 常见问题
+
+### Q: 如何处理OOM错误？
+A: 
+- 减小批次大小(`--batch_size`)
+- 启用混合精度训练(`--use_amp`)
+- 减少模型层数(`--llm_layers_to_use`)
+- 启用梯度检查点(默认开启)
+
+### Q: 如何恢复中断的训练？
+A: 训练会自动保存检查点到`logs/`目录，可以从最新检查点恢复。
+
+### Q: 如何调整数据集划分？
+A: 修改`data_preparation/preprocess_data.py`中的年份范围常量。
+
+### Q: 如何使用自定义的GPT-2模型？
+A: 修改`--local_gpt2_path`参数指向你的GPT-2模型文件目录。
+
+## 数据说明
+
+### 输入数据格式
+- **TEC历史数据**: 标准化后的电离层总电子含量
+- **空间天气指数**: Kp, Dst, AE, F10.7, Ap指数(标准化)
+- **时间特征**: 小时、星期、年积日的周期性编码(sin/cos)
+
+### 输出数据格式  
+- **TEC预测**: 原始量纲的未来TEC值
+- **形状**: `[批次大小, 节点数, 预测长度]`
 
 ## 许可证
 
-本项目采用 MIT 许可证。详情请见 [LICENSE](LICENSE) 文件。
+本项目采用MIT许可证。详情请见[LICENSE](LICENSE)文件。
 
-## 联系方式/引用
+## 贡献指南
 
-*   (请在此处添加您的联系方式或项目引用信息) 
+欢迎提交Issue和Pull Request！请确保：
+
+1. 代码符合项目风格
+2. 添加必要的测试
+3. 更新相关文档
+4. 提交前运行完整测试
+
+## 引用
+
+如果本项目对您的研究有帮助，请考虑引用：
+
+```bibtex
+@software{tecgpt_forecasting,
+  title={tecGPT-forecasting: LLM-based Ionospheric TEC Prediction},
+  author={Your Name},
+  year={2024},
+  url={https://github.com/your-username/tecGPT-forecasting}
+}
+```
+
+## 联系方式
+
+- 项目主页: [GitHub Repository](https://github.com/PANXIONG-CN/tecGPT-forecasting)
+- 问题反馈: [GitHub Issues](https://github.com/PANXIONG-CN/tecGPT-forecasting/issues)
+- 邮箱: xiong.pan@gmail.com

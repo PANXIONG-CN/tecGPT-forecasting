@@ -7,6 +7,7 @@ import pandas as pd
 import argparse
 import time
 import os
+import sys  # 添加sys模块导入
 import warnings
 import random
 from tqdm import tqdm
@@ -21,26 +22,11 @@ import json
 from datetime import datetime
 import traceback
 
-# 假设这些模块在你的PYTHONPATH中，或者tec_train.py与它们在合适的目录结构下
-# 例如，如果tec_train.py在src/下，而models和utils是src/的子目录
-from utils import util  # 或者 .utils import util
-from models.tec_gpt import ST_LLM  # 或者 .models.tec_gpt import ST_LLM
-
-# from ranger21 import Ranger # 如果ranger21.py在src或PYTHONPATH
-
-# 为了简单，如果ranger21.py在项目根目录，你可能需要修改PYTHONPATH或将它复制到src
-# 或者，如果 ranger21.py 就在 src/ 目录下:
-# from ranger21 import Ranger
-# 假设Ranger在util.py的同级目录或更上层可以被导入
-try:
-    from ranger21 import Ranger
-except ImportError:
-    # 如果ranger21.py在项目根目录，而此脚本在src/下运行
-    import sys
-
-    sys.path.append(os.path.join(os.path.dirname(__file__), ".."))  # 添加项目根到路径
-    from ranger21 import Ranger
-
+# 修改后的import语句，适应新的模块结构
+from utils import util
+from models.tecGPT.tec_gpt import ST_LLM
+from models import get_model, MODEL_REGISTRY
+from ranger21 import Ranger
 
 # 增加CUDA内存配置，尝试避免内存碎片化
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:True"
@@ -72,13 +58,16 @@ def parse_args():
     parser.add_argument("--sw_feat_dim", type=int, default=5, help="Number of Space Weather features in X input")
     parser.add_argument("--time_feat_dim", type=int, default=6, help="Number of cyclical Time features in X input")
 
+    # --- 模型选择 ---
+    parser.add_argument("--model_name", type=str, default="tecGPT", choices=["tecGPT"], help="Model to use for training")
+
     # --- 模型超参数 (tecGPT) ---
     parser.add_argument("--d_embed", type=int, default=128, help="Dimension for sub-embeddings")
     parser.add_argument("--d_llm", type=int, default=768, help="LLM hidden dimension (n_embd for GPT2)")
     parser.add_argument(
         "--local_gpt2_path",
         type=str,
-        default="/home/panxiong/tecGPT-forecasting/src/models/TEC-LLM/gpt2",  # 请替换为你的实际路径
+        default="/home/panxiong/tecGPT-forecasting/src/models/tecGPT/gpt2",  # 更新路径
         help="Path to local GPT-2 model files directory (config.json, pytorch_model.bin)",
     )
     parser.add_argument("--llm_layers_to_use", type=int, default=6, help="Number of GPT layers to USE from pretrained")
@@ -361,7 +350,9 @@ def train_ddp(rank, world_size, args):
         # 只在主进程初始化wandb
         if rank == 0 and args.use_wandb:
             wandb_run_name = f"tecGPT_ddp_{time.strftime('%Y%m%d-%H%M%S')}"
-            wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=wandb_run_name, group=args.wandb_group, config=vars(args))
+            config = vars(args).copy()
+            config.update(get_model_config(args))
+            wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=wandb_run_name, group=args.wandb_group, config=config)
 
         if rank == 0:
             os.makedirs(args.save_dir, exist_ok=True)
@@ -402,25 +393,7 @@ def train_ddp(rank, world_size, args):
         if rank == 0:
             print("Gradient checkpointing enabled to reduce memory usage")
 
-        model = ST_LLM(
-            input_len=args.history_len,
-            output_len=args.forecast_len,
-            num_nodes=args.num_nodes,
-            n_lat=args.n_lat,
-            n_lon=args.n_lon,
-            tec_feat_dim=args.tec_feat_dim,
-            sw_feat_dim=args.sw_feat_dim,
-            time_feat_dim=args.time_feat_dim,
-            d_embed=args.d_embed,
-            d_llm=args.d_llm,
-            llm_model_local_path=args.local_gpt2_path,
-            llm_layers_to_use=args.llm_layers_to_use,
-            U_unfrozen_mha=args.U_unfrozen_mha,
-            dropout_embed=args.dropout_embed,
-            dropout_llm_out=args.dropout_llm_out,
-            enable_gradient_checkpointing_llm=args.enable_gradient_checkpointing_llm,
-            device=str(device),
-        )
+        model = create_model(args)
 
         if rank == 0:
             print(f"Model instantiated. Trainable parameters: {model.param_num(trainable_only=True):,}")
@@ -586,12 +559,14 @@ def objective(trial, args):
     if args.use_wandb:
         run_name = f"trial_{trial.number}"
         # 初始化wandb，用于追踪单个trial
+        config = vars(args).copy()
+        config.update(get_model_config(args))
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             name=run_name,
             group=args.wandb_group or args.optuna_study_name,
-            config=vars(args),
+            config=config,
             reinit=True,
         )
         # 记录当前trial的超参数
@@ -612,25 +587,7 @@ def objective(trial, args):
     # 初始化模型
     print(f"Instantiating model for trial {trial.number}...")
 
-    model = ST_LLM(
-        input_len=args.history_len,
-        output_len=args.forecast_len,
-        num_nodes=args.num_nodes,
-        n_lat=args.n_lat,
-        n_lon=args.n_lon,
-        tec_feat_dim=args.tec_feat_dim,
-        sw_feat_dim=args.sw_feat_dim,
-        time_feat_dim=args.time_feat_dim,
-        d_embed=args.d_embed,
-        d_llm=args.d_llm,
-        llm_model_local_path=args.local_gpt2_path,
-        llm_layers_to_use=args.llm_layers_to_use,
-        U_unfrozen_mha=args.U_unfrozen_mha,
-        dropout_embed=args.dropout_embed,
-        dropout_llm_out=args.dropout_llm_out,
-        enable_gradient_checkpointing_llm=args.enable_gradient_checkpointing_llm,
-        device=str(device),
-    )
+    model = create_model(args)
 
     print(f"Trial {trial.number}: Model trainable parameters: {model.param_num(trainable_only=True):,}")
 
@@ -805,7 +762,9 @@ def main():
         if args.use_optuna:
             wandb_run_name += "_final_model"
 
-        wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=wandb_run_name, group=args.wandb_group, config=vars(args))
+        config = vars(args).copy()
+        config.update(get_model_config(args))
+        wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=wandb_run_name, group=args.wandb_group, config=config)
 
     # 检查是否使用分布式训练
     if args.use_ddp or "--use_ddp" in sys.argv:
@@ -870,25 +829,7 @@ def run_single_gpu_training(args):
     print("Gradient checkpointing enabled to reduce memory usage")
 
     try:
-        model = ST_LLM(
-            input_len=args.history_len,
-            output_len=args.forecast_len,
-            num_nodes=args.num_nodes,
-            n_lat=args.n_lat,
-            n_lon=args.n_lon,
-            tec_feat_dim=args.tec_feat_dim,
-            sw_feat_dim=args.sw_feat_dim,
-            time_feat_dim=args.time_feat_dim,
-            d_embed=args.d_embed,
-            d_llm=args.d_llm,
-            llm_model_local_path=args.local_gpt2_path,
-            llm_layers_to_use=args.llm_layers_to_use,
-            U_unfrozen_mha=args.U_unfrozen_mha,
-            dropout_embed=args.dropout_embed,
-            dropout_llm_out=args.dropout_llm_out,
-            enable_gradient_checkpointing_llm=args.enable_gradient_checkpointing_llm,
-            device=str(device),
-        )
+        model = create_model(args)
         print(f"Model instantiated. Trainable parameters: {model.param_num(trainable_only=True):,}")
         print(f"Model instantiated. Total parameters: {model.param_num(trainable_only=False):,}")
     except Exception as e:
@@ -981,6 +922,65 @@ def run_single_gpu_training(args):
 
     print(f"\nBest validation MAE achieved during training: {trainer.best_val_mae:.4f}")
     print(f"Full results saved to: {args.save_dir}")
+
+
+def create_model(args):
+    """模型工厂函数：根据参数创建相应的模型"""
+    model_class = get_model(args.model_name)
+
+    # 根据模型类型创建不同的参数配置
+    if args.model_name == "tecGPT":
+        model = model_class(
+            input_len=args.history_len,
+            output_len=args.forecast_len,
+            num_nodes=args.num_nodes,
+            n_lat=args.n_lat,
+            n_lon=args.n_lon,
+            tec_feat_dim=args.tec_feat_dim,
+            sw_feat_dim=args.sw_feat_dim,
+            time_feat_dim=args.time_feat_dim,
+            d_embed=args.d_embed,
+            d_llm=args.d_llm,
+            llm_model_local_path=args.local_gpt2_path,
+            llm_layers_to_use=args.llm_layers_to_use,
+            U_unfrozen_mha=args.U_unfrozen_mha,
+            dropout_embed=args.dropout_embed,
+            dropout_llm_out=args.dropout_llm_out,
+            enable_gradient_checkpointing_llm=args.enable_gradient_checkpointing_llm,
+            device=str(args.device),
+        )
+    else:
+        # 为未来的模型预留接口
+        raise NotImplementedError(f"Model {args.model_name} not yet implemented")
+
+    return model
+
+
+def get_model_config(args):
+    """获取模型配置信息，用于wandb和optuna记录"""
+    config = {
+        "model_name": args.model_name,
+        "model_type": args.model_name,
+        "num_nodes": args.num_nodes,
+        "history_len": args.history_len,
+        "forecast_len": args.forecast_len,
+    }
+
+    # 根据模型类型添加特定配置
+    if args.model_name == "tecGPT":
+        config.update(
+            {
+                "d_embed": args.d_embed,
+                "d_llm": args.d_llm,
+                "llm_layers_to_use": args.llm_layers_to_use,
+                "U_unfrozen_mha": args.U_unfrozen_mha,
+                "dropout_embed": args.dropout_embed,
+                "dropout_llm_out": args.dropout_llm_out,
+                "enable_gradient_checkpointing_llm": args.enable_gradient_checkpointing_llm,
+            }
+        )
+
+    return config
 
 
 if __name__ == "__main__":
