@@ -146,3 +146,11 @@ Y_temp.mmap
 
 # 大型模型文件
 src/models/TEC-LLM/gpt2/pytorch_model.bin 
+
+# Optuna database files
+*.db
+tecgpt_optuna.db
+
+# Memory mapped files
+*.mmap
+Y_temp.mmap 
