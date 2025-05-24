@@ -146,6 +146,8 @@ Y_temp.mmap
 
 # 大型模型文件
 src/models/TEC-LLM/gpt2/pytorch_model.bin 
+src/models/TEC-LLM/gpt2/merges.txt
+src/models/TEC-LLM/gpt2/vocab.json
 
 # Optuna database files
 *.db
