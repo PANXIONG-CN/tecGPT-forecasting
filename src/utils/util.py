@@ -65,12 +65,22 @@ class StandardScaler:
         except FileNotFoundError:
             raise FileNotFoundError(f"Scaler file not found at: {scaler_path}. Please run preprocessing first.")
 
-        tec_mean = scaler_params["tec_mean"]  # Shape: [N_nodes]
-        tec_std = scaler_params["tec_std"]  # Shape: [N_nodes]
+        # scaler_params 字典现在包含 'tec_scaler' (一个 NodeScaler 实例) 和 'sw_scaler' (一个 FeatureScaler 实例)
+        tec_node_scaler = scaler_params.get("tec_scaler")
+        sw_feature_scaler = scaler_params.get("sw_scaler")
 
-        # SW 指数 scaler 参数 (如果也在 scaler_path 中保存)
-        self.sw_mean_np = scaler_params.get("sw_mean", None)  # Shape: [N_SW_Indices]
-        self.sw_std_np = scaler_params.get("sw_std", None)  # Shape: [N_SW_Indices]
+        if tec_node_scaler is None:
+            raise ValueError("tec_scaler not found in the loaded scaler file.")
+
+        tec_mean = tec_node_scaler.mean_  # Shape: [N_nodes]
+        tec_std = tec_node_scaler.std_  # Shape: [N_nodes]
+
+        # SW 指数 scaler 参数
+        self.sw_mean_np = None
+        self.sw_std_np = None
+        if sw_feature_scaler:
+            self.sw_mean_np = sw_feature_scaler.mean_  # Shape: [N_SW_Indices]
+            self.sw_std_np = sw_feature_scaler.std_  # Shape: [N_SW_Indices]
 
         self.device = device
         # 用于 TEC 逆变换 (输入 [B, N, S])

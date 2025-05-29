@@ -21,12 +21,19 @@ import wandb  # 导入wandb进行实验追踪
 import json
 from datetime import datetime
 import traceback
+import gc  # 导入gc模块
+
+# 将项目根目录添加到Python路径中
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 # 修改后的import语句，适应新的模块结构
 from utils import util
 from models.tecGPT.tec_gpt import ST_LLM
 from models import get_model, MODEL_REGISTRY
 from ranger21 import Ranger
+from data_preparation.preprocess_data import NodeScaler, FeatureScaler  # 解决pickle加载问题
 
 # 增加CUDA内存配置，尝试避免内存碎片化
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:True"
@@ -521,7 +528,7 @@ def objective(trial, args):
 
     # 保存原始批量大小，然后设置为较小的值以节省内存
     original_batch_size = args.batch_size
-    args.batch_size = 4  # 为Optuna优化使用更小的批量大小
+    args.batch_size = 12  # 为Optuna优化使用更合理的批量大小（进一步调整为12）
 
     # 更新超参数
     # 学习率 (log尺度搜索)
@@ -576,13 +583,23 @@ def objective(trial, args):
     # 加载数据集
     print(f"Loading dataset for trial {trial.number}...")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    dataset_loaders = util.load_dataset(
-        dataset_dir=args.data_dir, scaler_path=args.scaler_path, batch_size=args.batch_size, target_device=str(device)
-    )
 
-    train_loader = dataset_loaders["train_loader"]
-    val_loader = dataset_loaders["val_loader"]
-    scaler = dataset_loaders["scaler"]
+    # 修改 util.load_dataset 的调用方式，以便后续清理
+    loaded_data_dict = {}  # 用于接收 util.load_dataset 返回的完整字典
+
+    # 创建 DataLoader 实例
+    train_loader = util.DataLoader(
+        np.load(os.path.join(args.data_dir, "train.npz"))["x"],
+        np.load(os.path.join(args.data_dir, "train.npz"))["y"],
+        args.batch_size,
+        shuffle_on_init=True,
+    )
+    val_loader = util.DataLoader(
+        np.load(os.path.join(args.data_dir, "val.npz"))["x"], np.load(os.path.join(args.data_dir, "val.npz"))["y"], args.batch_size
+    )
+    # Scaler 仍然像以前一样加载
+    scaler_device = str(device) if torch.cuda.is_available() else "cpu"
+    scaler = util.StandardScaler(scaler_path=args.scaler_path, device=scaler_device)
 
     # 初始化模型
     print(f"Instantiating model for trial {trial.number}...")
@@ -607,8 +624,8 @@ def objective(trial, args):
 
     # 减少训练轮数以加快优化
     original_epochs = args.epochs
-    args.epochs = min(args.epochs, 30)  # 最多30轮用于超参数搜索
-    args.patience = min(args.patience, 10)  # 减小早停耐心值
+    args.epochs = min(args.epochs, 20)  # 最多20轮用于超参数搜索（从30减少到20）
+    args.patience = min(args.patience, 8)  # 减小早停耐心值（从10减少到8）
 
     # 训练
     try:
@@ -625,6 +642,9 @@ def objective(trial, args):
     finally:
         # 清理内存
         torch.cuda.empty_cache()
+        # 显式删除大型数据对象
+        del train_loader, val_loader, scaler, model, optimizer, scheduler
+        gc.collect()  # 强制垃圾回收
 
         # 如果使用wandb，结束当前run
         if args.use_wandb and wandb.run is not None:

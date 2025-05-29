@@ -6,6 +6,7 @@ pandas
 scipy
 h5py
 scikit-learn
+tqdm
 
 # Experiment Management & Utilities
 hydra-core

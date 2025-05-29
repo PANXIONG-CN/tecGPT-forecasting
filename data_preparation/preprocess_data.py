@@ -7,6 +7,7 @@ import os
 import pickle
 from tqdm import tqdm
 import argparse
+import gc  # 添加垃圾回收
 
 # --- 配置参数 ---
 YEARS_ALL = list(range(2013, 2026))  # 数据覆盖的所有年份 (2013-2025)
@@ -274,6 +275,8 @@ def main():
     parser.add_argument("--hdf5_dir", type=str, default="data_preparation", help="Directory containing HDF5 files")
     parser.add_argument("--output_dir", type=str, default="./processed_tec_data", help="Output directory for processed data")
     parser.add_argument("--batch_process", action="store_true", help="Process and save in batches (for large datasets)")
+    parser.add_argument("--skip_train", action="store_true", help="Skip training data processing")
+    parser.add_argument("--only_train", action="store_true", help="Only process training data")
 
     args = parser.parse_args()
 
@@ -285,38 +288,59 @@ def main():
 
     print("=== TEC数据预处理开始 ===")
 
-    # 1. 收集所有训练集数据用于计算标准化参数
-    print("Step 1: 计算标准化参数...")
-    all_tec_train = []
-    all_sw_train = []
+    # 检查scaler是否已存在
+    if os.path.exists(SCALER_PATH) and not args.skip_train:
+        print("Scaler already exists, loading...")
+        with open(SCALER_PATH, "rb") as f:
+            scalers = pickle.load(f)
+            tec_scaler = scalers["tec_scaler"]
+            sw_scaler = scalers["sw_scaler"]
+    elif args.skip_train and os.path.exists(SCALER_PATH):
+        print("Loading existing scaler...")
+        with open(SCALER_PATH, "rb") as f:
+            scalers = pickle.load(f)
+            tec_scaler = scalers["tec_scaler"]
+            sw_scaler = scalers["sw_scaler"]
+    else:
+        # 1. 收集所有训练集数据用于计算标准化参数
+        print("Step 1: 计算标准化参数...")
+        all_tec_train = []
+        all_sw_train = []
 
-    for year in YEARS_TRAIN:
-        tec_flat, tec_orig, sw_array, time_feat = process_year_data(year, HDF5_DIR)
-        if tec_flat is not None:
-            all_tec_train.append(tec_flat)
-            all_sw_train.append(sw_array)
+        for year in YEARS_TRAIN:
+            tec_flat, tec_orig, sw_array, time_feat = process_year_data(year, HDF5_DIR)
+            if tec_flat is not None:
+                all_tec_train.append(tec_flat)
+                all_sw_train.append(sw_array)
 
-    if not all_tec_train:
-        raise ValueError("No training data found!")
+        if not all_tec_train:
+            raise ValueError("No training data found!")
 
-    # 合并所有训练数据
-    tec_train_combined = np.concatenate(all_tec_train, axis=0)
-    sw_train_combined = np.concatenate(all_sw_train, axis=0)
+        # 合并所有训练数据
+        tec_train_combined = np.concatenate(all_tec_train, axis=0)
+        sw_train_combined = np.concatenate(all_sw_train, axis=0)
 
-    # 拟合标准化器
-    tec_scaler = NodeScaler(N_NODES, fill_value=FILL_VALUE)
-    tec_scaler.fit(tec_train_combined)
+        # 拟合标准化器
+        tec_scaler = NodeScaler(N_NODES, fill_value=FILL_VALUE)
+        tec_scaler.fit(tec_train_combined)
 
-    sw_scaler = FeatureScaler(N_SW_INDICES)
-    sw_scaler.fit(sw_train_combined)
+        sw_scaler = FeatureScaler(N_SW_INDICES)
+        sw_scaler.fit(sw_train_combined)
 
-    # 保存标准化器
-    with open(SCALER_PATH, "wb") as f:
-        pickle.dump({"tec_scaler": tec_scaler, "sw_scaler": sw_scaler}, f)
-    print(f"Scaler saved to {SCALER_PATH}")
+        # 保存标准化器
+        with open(SCALER_PATH, "wb") as f:
+            pickle.dump({"tec_scaler": tec_scaler, "sw_scaler": sw_scaler}, f)
+        print(f"Scaler saved to {SCALER_PATH}")
 
     # 2. 处理各个数据集
-    for split_name, years in [("train", YEARS_TRAIN), ("val", YEARS_VAL), ("test", YEARS_TEST)]:
+    if args.only_train:
+        splits_to_process = [("train", YEARS_TRAIN)]
+    elif args.skip_train:
+        splits_to_process = [("val", YEARS_VAL), ("test", YEARS_TEST)]
+    else:
+        splits_to_process = [("train", YEARS_TRAIN), ("val", YEARS_VAL), ("test", YEARS_TEST)]
+
+    for split_name, years in splits_to_process:
         print(f"\nStep 2: 处理{split_name}数据集...")
 
         X_all_split = []
@@ -339,14 +363,29 @@ def main():
                 Y_all_split.append(Y_year)
                 print(f"  Year {year}: {X_year.shape[0]} sequences created")
 
+            # 清理中间变量
+            del tec_flat, tec_orig, sw_array, time_feat, tec_scaled, sw_scaled
+            if X_year is not None:
+                del X_year, Y_year
+            gc.collect()
+
         if X_all_split:
             # 合并所有年份数据
+            print(f"  合并{split_name}数据...")
             X_combined = np.concatenate(X_all_split, axis=0)
             Y_combined = np.concatenate(Y_all_split, axis=0)
+
+            # 清理分割列表
+            del X_all_split, Y_all_split
+            gc.collect()
 
             # 保存最终数据集
             output_path = os.path.join(OUTPUT_DIR, f"{split_name}.npz")
             save_final_dataset(X_combined, Y_combined, output_path)
+
+            # 清理合并数据
+            del X_combined, Y_combined
+            gc.collect()
         else:
             print(f"  Warning: No data found for {split_name} split")
 
