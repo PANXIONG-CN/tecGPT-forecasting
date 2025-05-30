@@ -1,0 +1,25 @@
+# conf/model/convlstm.yaml
+_target_: src.tec_train.create_model
+model_name: ConvLSTM
+
+# ConvLSTM 特定参数 (基于 src/models/ConvLSTM/convlstm.py)
+# 假设输入是 [B, T, C, H, W]
+# 对于TEC数据 [B, P, N_nodes, C_in], 需要reshape
+# N_nodes = lat * lon. C_in 可能是1 (仅TEC) 或更多 (TEC+SW+Time)
+# 假设我们只用TEC作为图像通道，P是时间序列长度
+input_dim: 1 # 输入特征通道数 (例如，如果只用TEC值作为图像的一个通道)
+hidden_dim: [64, 64, 128] # 每个ConvLSTM层的隐藏单元数 (列表长度等于num_layers)
+kernel_size: [[3,3], [3,3], [3,3]] # 每个ConvLSTM层的卷积核大小 (列表长度等于num_layers)
+num_layers: 3
+batch_first: true
+bias: true
+# return_all_layers: false # 通常我们只需要最后一层的输出进行预测
+
+# 数据相关的转换参数 (这些参数需要与实际输入匹配)
+# 例如，如果输入是 [B, P, N_nodes], 我们需要将其reshape为 [B, P, 1, n_lat, n_lon]
+# ConvLSTM的input_dim将是1。
+# 最终输出后还需要一个线性层将ConvLSTM的输出映射到预测长度 S*N_nodes
+# (或者 S 个 N_nodes 的特征图)
+img_height: ${dataset.n_lat} # 引用dataset配置
+img_width: ${dataset.n_lon}  # 引用dataset配置
+forecast_len: ${dataset.forecast_len} # 用于定义输出层 

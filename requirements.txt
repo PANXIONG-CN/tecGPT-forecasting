@@ -10,10 +10,13 @@ tqdm
 
 # Experiment Management & Utilities
 hydra-core
+hydra-optuna-sweeper
 wandb
 optuna
-# For optuna integration with hydra
-hydra-optuna-sweeper
+
+# Additional dependencies for visualization and other utilities
+matplotlib
+seaborn
 
 # Add other specific dependencies here
 # e.g., matplotlib for plotting

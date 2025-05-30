@@ -3,27 +3,24 @@
 """
 
 # tecGPT模型
-from .tecGPT import ST_LLM, PFA_GPT2, TecHistoryEmbedding, TimeFeatureEmbedding, SpatialEmbedding, SpaceWeatherEmbedding, FusionLayer
+from .tecGPT import tecGPT
 
 # 模型注册表，用于动态选择模型
-MODEL_REGISTRY = {"tecGPT": ST_LLM, "ST_LLM": ST_LLM}  # 别名
+MODEL_REGISTRY = {
+    "tecGPT": tecGPT,
+}
 
 
-def get_model(model_name):
+def get_model_class(model_name: str):
     """根据模型名称获取模型类"""
-    if model_name not in MODEL_REGISTRY:
+    model_cls = MODEL_REGISTRY.get(model_name)
+    if model_cls is None:
         raise ValueError(f"Model {model_name} not found. Available models: {list(MODEL_REGISTRY.keys())}")
-    return MODEL_REGISTRY[model_name]
+    return model_cls
 
 
 __all__ = [
-    "ST_LLM",
-    "PFA_GPT2",
-    "TecHistoryEmbedding",
-    "TimeFeatureEmbedding",
-    "SpatialEmbedding",
-    "SpaceWeatherEmbedding",
-    "FusionLayer",
+    "tecGPT",
     "MODEL_REGISTRY",
-    "get_model",
+    "get_model_class",
 ]

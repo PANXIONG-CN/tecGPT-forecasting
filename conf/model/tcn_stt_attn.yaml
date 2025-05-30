@@ -1,0 +1,32 @@
+# conf/model/tcn_stt_attn.yaml
+_target_: src.tec_train.create_model
+model_name: TCN-STT-ATTN
+
+# TCNSpatioTemporalTransformer 特定参数 (基于 src/models/TCN-STT-ATTN/TCN-STT-ATTN.py)
+# x: Tensor of shape (batch, time_steps, tec_features + aux_features)
+# tec_features: TEC的特征数 (通常是 num_nodes if flattened, or 1 if per node)
+# aux_features: 辅助特征数 (sw_feat_dim + time_feat_dim)
+# num_channels: TCN内部通道
+# transformer_heads: Transformer头数
+# transformer_layers: Transformer层数
+# ff_hidden_size: Transformer前馈网络隐藏层大小
+# output_size: 预测输出维度 (num_nodes * forecast_len)
+# dropout: dropout率
+# time_steps: 输入序列长度 (history_len)
+
+# 这里的 tec_features 应该是每个空间位置的特征数，在原始TCN-STT-ATTN代码中是255
+# 如果我们按节点处理，tec_features=1。如果将所有节点展平作为特征，tec_features=num_nodes
+# 从TCN-STT-ATTN.py的实现看，它期望tec_features是空间维度，aux是额外特征
+# 它内部使用 SpatialAttention(tec_features, aux_features, time_steps)
+# 这里的 tec_features 对应原始代码中的 255 (可能是格点数量)
+# aux_features 对应 辅助特征数 (e.g. 5 SW + 6 Time = 11)
+
+tec_features: ${dataset.num_nodes} # 假设这里的tec_features是空间节点数
+aux_features: ${eval:'${dataset.sw_feat_dim} + ${dataset.time_feat_dim}'}
+num_channels: [128, 256, 128] # TCN 通道
+transformer_heads: 8
+transformer_layers: 2
+ff_hidden_size: 512 # 通常与 d_model (Transformer内部维度)一致
+output_size: ${eval:'${dataset.num_nodes} * ${dataset.forecast_len}'}
+dropout: 0.2
+time_steps: ${dataset.history_len} 

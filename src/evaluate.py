@@ -10,7 +10,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from utils import util
-from models.tecGPT.tec_gpt import ST_LLM
+from models.tecGPT.tec_gpt import tecGPT
 
 
 def parse_args():
@@ -61,10 +61,12 @@ def main():
 
     # 创建模型
     print("创建模型...")
-    model = ST_LLM(
+    model = tecGPT(
         input_len=args.history_len,
         output_len=args.forecast_len,
         num_nodes=args.num_nodes,
+        n_lat=41,
+        n_lon=71,
         tec_feat_dim=args.tec_feat_dim,
         sw_feat_dim=args.sw_feat_dim,
         time_feat_dim=args.time_feat_dim,
@@ -73,6 +75,9 @@ def main():
         llm_model_local_path=args.local_gpt2_path,
         llm_layers_to_use=args.llm_layers_to_use,
         U_unfrozen_mha=args.U_unfrozen_mha,
+        dropout_embed=0.1,
+        dropout_llm_out=0.1,
+        enable_gradient_checkpointing_llm=False,
         device=str(device),
     ).to(device)
 

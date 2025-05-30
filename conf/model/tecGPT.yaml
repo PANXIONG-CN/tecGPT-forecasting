@@ -1,0 +1,13 @@
+# conf/model/tecGPT.yaml
+_target_: src.tec_train.create_model # 指向创建模型的函数
+model_name: tecGPT
+
+# tecGPT 特有参数 (从原argparse或README中提取)
+d_embed: 128
+d_llm: 768
+local_gpt2_path: "/home/panxiong/tecGPT-forecasting/src/models/tecGPT/gpt2"
+llm_layers_to_use: 6
+U_unfrozen_mha: 2
+dropout_embed: 0.1
+dropout_llm_out: 0.1
+enable_gradient_checkpointing_llm: false 

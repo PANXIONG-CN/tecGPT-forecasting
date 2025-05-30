@@ -5,7 +5,7 @@ from .embeddings import TecHistoryEmbedding, TimeFeatureEmbedding, SpatialEmbedd
 from .pfa_llm import PFA_GPT2
 
 
-class ST_LLM(nn.Module):
+class tecGPT(nn.Module):
     def __init__(
         self,
         input_len: int,

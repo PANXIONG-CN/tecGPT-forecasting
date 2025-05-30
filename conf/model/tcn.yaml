@@ -1,0 +1,37 @@
+# conf/model/tcn.yaml
+_target_: src.tec_train.create_model
+model_name: TCN
+
+# TCNModel 特定参数 (基于 src/models/TCN/TCN.py)
+# TCN 通常处理 (N, C_in, L_in)
+# 我们的数据是 (B, P, N_nodes, C_features),
+# 对于每个节点可以看作一个独立的序列 (B, P, C_features), 或 (B, N_nodes, P, C_features)
+# 或者将 N_nodes * C_features 作为TCN的输入通道数
+# 或者将所有节点展平，每个节点独立预测，这样input_size=P, output_size=S
+# TCNModel的实现是针对 (batch_size, num_features, seq_length) -> (batch_size, output_size_flat)
+# 这里假设我们将 P 作为 seq_length, N_nodes * C_input_per_node 作为 input_size
+# 并且模型预测的是下一个时间步的 N_nodes * C_output_per_node
+
+# 参数基于 `src/models/TCN/TCN.py` 中的示例，需要调整以匹配我们的数据
+# input_size: 通常是特征维度 (N_nodes * 1 for TEC only, or C_features_per_node if each node has multiple features)
+# output_size: 通常是预测的目标维度 (N_nodes * 1 for TEC only, or C_output_features_per_node)
+# 我们需要预测 S 步，所以 TCN 后面可能还需要一个循环或直接输出 S*output_size_per_step
+
+# 以下参数需要根据实际TCN封装和使用方式调整
+# 如果每个节点一个TCN模型，或者一个TCN模型处理所有节点
+# 假设TCN的 input_size 是每个时间步的特征数 (C_in from dataset config)
+# num_channels: TCN内部通道数
+# kernel_size: TCN卷积核大小
+# dropout: TCN的dropout率
+# output_size: TCN输出的特征数，然后可能接一个Linear到 forecast_len
+
+# 这是一个简化的配置，TCNModel.py 似乎是一维序列预测，需要适配我们的多变量、多节点、多步预测场景
+# 如果 TCNModel 是 (batch_size, input_features_per_step, history_len) -> (batch_size, output_features_per_step * forecast_len)
+# 那么 input_size = num_nodes (如果每个节点是一个特征)
+# output_size = num_nodes * forecast_len (如果直接预测所有步)
+
+input_size: ${dataset.num_nodes} # 假设每个节点是一个输入特征给TCN
+num_channels: [128, 256, 128] # TCN通道数，列表长度为层数
+kernel_size: 3
+dropout: 0.2
+output_size: ${eval:'${dataset.num_nodes} * ${dataset.forecast_len}'} # TCN直接输出所有节点和所有未来步 

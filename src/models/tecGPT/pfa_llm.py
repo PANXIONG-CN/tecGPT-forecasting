@@ -136,6 +136,11 @@ class PFA_GPT2(nn.Module):
         nn.init.normal_(self.gpt2.wpe.weight, std=0.02)  # 标准初始化
         print(f"PFA_GPT2: Reinitialized GPT2 wpe for {num_spatial_nodes} positions (nodes).")
 
+        # 禁用位置嵌入，让模型完全依赖外部的SpatialEmbedding
+        print("PFA_GPT2: Nullifying GPT2 wpe weights and making it non-trainable to rely on external SpatialEmbedding.")
+        self.gpt2.wpe.weight.data.zero_()  # 将权重设为0
+        self.gpt2.wpe.weight.requires_grad = False  # 设为不可训练
+
         # 6. 梯度检查点
         if enable_gradient_checkpointing:
             if hasattr(self.gpt2, "gradient_checkpointing_enable") and callable(self.gpt2.gradient_checkpointing_enable):

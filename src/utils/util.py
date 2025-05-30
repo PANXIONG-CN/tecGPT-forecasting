@@ -6,19 +6,16 @@ from tqdm import tqdm  # 假设你可能在其他地方用
 
 
 class DataLoader(object):
-    def __init__(self, xs, ys, batch_size, pad_with_last_sample=True, shuffle_on_init=False):  # 增加 shuffle_on_init
+    def __init__(self, xs, ys, batch_size, pad_with_last_sample=True, shuffle=False):  # 改为 shuffle 参数
         self.batch_size = batch_size
         self.current_ind = 0
+        self.should_shuffle = shuffle  # 保存是否需要shuffle的标志
         self.xs_orig = np.array(xs)  # 保存原始副本以备重排
         self.ys_orig = np.array(ys)
 
-        if shuffle_on_init:  # 首次加载时打乱
-            permutation = np.random.permutation(len(self.xs_orig))
-            self.xs = self.xs_orig[permutation]
-            self.ys = self.ys_orig[permutation]
-        else:
-            self.xs = self.xs_orig
-            self.ys = self.ys_orig
+        # 移除初始化时的shuffle逻辑，直接使用原始数据
+        self.xs = self.xs_orig.copy()
+        self.ys = self.ys_orig.copy()
 
         if pad_with_last_sample and len(self.xs) > 0:  # 确保 xs 不为空
             num_padding = (batch_size - (len(self.xs) % batch_size)) % batch_size
@@ -31,7 +28,7 @@ class DataLoader(object):
         self.size = len(self.xs)
         self.num_batch = int(self.size // self.batch_size) if self.size > 0 else 0
 
-    def shuffle(self):
+    def shuffle_data(self):
         """打乱当前数据副本，而不是原始数据"""
         if self.size > 0:
             permutation = np.random.permutation(self.size)
@@ -40,8 +37,9 @@ class DataLoader(object):
 
     def get_iterator(self):
         self.current_ind = 0
-        # 在每个 epoch 开始时打乱数据是一个好习惯
-        self.shuffle()
+        # 只有当should_shuffle为True时才打乱数据（用于训练集）
+        if self.should_shuffle:
+            self.shuffle_data()
 
         def _wrapper():
             if self.num_batch == 0:  # 如果没有数据或不够一个批次
@@ -136,7 +134,7 @@ def load_dataset(dataset_dir, scaler_path, batch_size, valid_batch_size=None, te
     device_for_scaler = target_device if torch.cuda.is_available() else "cpu"
     data["scaler"] = StandardScaler(scaler_path=scaler_path, device=device_for_scaler)
 
-    data["train_loader"] = DataLoader(data["x_train"], data["y_train"], batch_size, shuffle_on_init=True)
+    data["train_loader"] = DataLoader(data["x_train"], data["y_train"], batch_size, shuffle=True)
     data["val_loader"] = DataLoader(data["x_val"], data["y_val"], valid_batch_size or batch_size)
     data["test_loader"] = DataLoader(data["x_test"], data["y_test"], test_batch_size or batch_size)
 
