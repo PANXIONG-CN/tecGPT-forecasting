@@ -6,26 +6,40 @@ from tqdm import tqdm  # 假设你可能在其他地方用
 
 
 class DataLoader(object):
-    def __init__(self, xs, ys, batch_size, pad_with_last_sample=True, shuffle=False):  # 改为 shuffle 参数
+    def __init__(self, data_dict=None, batch_size=32, shuffle=False):
+        """
+        数据加载器初始化
+        Args:
+            data_dict: 包含'x'和'y'键的字典，或者直接传入x和y数组
+            batch_size: 批处理大小
+            shuffle: 是否打乱数据
+        """
         self.batch_size = batch_size
         self.current_ind = 0
-        self.should_shuffle = shuffle  # 保存是否需要shuffle的标志
-        self.xs_orig = np.array(xs)  # 保存原始副本以备重排
-        self.ys_orig = np.array(ys)
+        self.should_shuffle = shuffle
 
-        # 移除初始化时的shuffle逻辑，直接使用原始数据
+        # 处理输入数据
+        if isinstance(data_dict, dict) and "x" in data_dict and "y" in data_dict:
+            self.xs_orig = np.array(data_dict["x"])
+            self.ys_orig = np.array(data_dict["y"])
+        else:
+            raise ValueError("data_dict必须是包含'x'和'y'键的字典")
+
+        # 复制数据用于处理
         self.xs = self.xs_orig.copy()
         self.ys = self.ys_orig.copy()
 
-        if pad_with_last_sample and len(self.xs) > 0:  # 确保 xs 不为空
-            num_padding = (batch_size - (len(self.xs) % batch_size)) % batch_size
+        # 计算填充
+        self.size = len(self.xs)
+        if self.size > 0:
+            num_padding = (batch_size - (self.size % batch_size)) % batch_size
             if num_padding > 0:
                 x_padding = np.repeat(self.xs[-1:], num_padding, axis=0)
                 y_padding = np.repeat(self.ys[-1:], num_padding, axis=0)
                 self.xs = np.concatenate([self.xs, x_padding], axis=0)
                 self.ys = np.concatenate([self.ys, y_padding], axis=0)
+                self.size = len(self.xs)
 
-        self.size = len(self.xs)
         self.num_batch = int(self.size // self.batch_size) if self.size > 0 else 0
 
     def shuffle_data(self):
@@ -115,30 +129,71 @@ class StandardScaler:
     # 但可以保留 inverse_transform_sw 如果模型也预测SW指数 (当前场景不需要)
 
 
-def load_dataset(dataset_dir, scaler_path, batch_size, valid_batch_size=None, test_batch_size=None, target_device="cuda"):
-    data = {}
+def load_from_files(x_file_path, y_file_path):
+    """从npz文件加载x和y数据"""
+    try:
+        x_data = np.load(x_file_path)
+        y_data = np.load(y_file_path)
+        # 假设npz文件中的数组名为"arr_0"，这是np.save默认行为
+        x = x_data["arr_0"] if "arr_0" in x_data else x_data["x"]
+        y = y_data["arr_0"] if "arr_0" in y_data else y_data["y"]
+        return {"x": x, "y": y}
+    except FileNotFoundError:
+        raise FileNotFoundError(f"数据文件不存在: {x_file_path} 或 {y_file_path}")
+    except Exception as e:
+        raise Exception(f"加载数据时出错: {e}")
+
+
+def load_scaler(scaler_path):
+    """加载标准化器"""
+    return StandardScaler(scaler_path=scaler_path)
+
+
+def load_dataset(dataset_dir, scaler_path, batch_size=32, target_device=None, load_test=True):
+    """Load the preprocessed TEC dataset."""
     print(f"Loading preprocessed data from: {dataset_dir}")
 
-    for category in ["train", "val", "test"]:
-        filepath = os.path.join(dataset_dir, category + ".npz")
+    # 加载训练数据
+    try:
+        train_data = np.load(os.path.join(dataset_dir, "train.npz"))
+        train_x = train_data["x"]
+        train_y = train_data["y"]
+        print(f"Loaded train data: x shape {train_x.shape}, y shape {train_y.shape}")
+    except Exception as e:
+        raise Exception(f"训练数据加载失败: {e}")
+
+    # 加载验证数据
+    try:
+        val_data = np.load(os.path.join(dataset_dir, "val.npz"))
+        val_x = val_data["x"]
+        val_y = val_data["y"]
+        print(f"Loaded val data: x shape {val_x.shape}, y shape {val_y.shape}")
+    except Exception as e:
+        raise Exception(f"验证数据加载失败: {e}")
+
+    # 有条件地加载测试数据
+    test_x, test_y = None, None
+    if load_test:
         try:
-            cat_data = np.load(filepath)
-            # x 形状: (Num_Samples, P, N_nodes, C_in=12)
-            # y 形状: (Num_Samples, S, N_nodes, 1)
-            data["x_" + category] = cat_data["x"]
-            data["y_" + category] = cat_data["y"]
-            print(f"Loaded {category} data: x shape {data['x_'+category].shape}, y shape {data['y_'+category].shape}")
-        except FileNotFoundError:
-            raise FileNotFoundError(f"{filepath} not found. Please run preprocessing first.")
+            test_data = np.load(os.path.join(dataset_dir, "test.npz"))
+            test_x = test_data["x"]
+            test_y = test_data["y"]
+            print(f"Loaded test data: x shape {test_x.shape}, y shape {test_y.shape}")
+        except Exception as e:
+            print(f"Warning: 测试数据加载失败: {e}")
 
-    device_for_scaler = target_device if torch.cuda.is_available() else "cpu"
-    data["scaler"] = StandardScaler(scaler_path=scaler_path, device=device_for_scaler)
+    # 加载标准化器
+    scaler = StandardScaler(scaler_path=scaler_path)
 
-    data["train_loader"] = DataLoader(data["x_train"], data["y_train"], batch_size, shuffle=True)
-    data["val_loader"] = DataLoader(data["x_val"], data["y_val"], valid_batch_size or batch_size)
-    data["test_loader"] = DataLoader(data["x_test"], data["y_test"], test_batch_size or batch_size)
+    # 创建数据加载器
+    train_loader = DataLoader({"x": train_x, "y": train_y}, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader({"x": val_x, "y": val_y}, batch_size=batch_size, shuffle=False)
 
-    return data
+    test_loader = None
+    if load_test and test_x is not None and test_y is not None:
+        test_loader = DataLoader({"x": test_x, "y": test_y}, batch_size=batch_size, shuffle=False)
+
+    return {"train_loader": train_loader, "val_loader": val_loader, "test_loader": test_loader, "scaler": scaler}
 
 
 # --- 评价指标函数 ---

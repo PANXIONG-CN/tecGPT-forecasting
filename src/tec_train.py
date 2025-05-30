@@ -312,14 +312,22 @@ def run_training(cfg: DictConfig):
     # 启用内存优化选项
     torch.backends.cudnn.benchmark = True
 
+    # 确保CUDA缓存被清空
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("CUDA cache cleared")
+
     print("Loading dataset...")
     try:
         dataset_loaders = util.load_dataset(
-            dataset_dir=cfg.dataset.data_dir, scaler_path=cfg.dataset.scaler_path, batch_size=cfg.trainer.batch_size, target_device=str(device)
+            dataset_dir=cfg.dataset.data_dir,
+            scaler_path=cfg.dataset.scaler_path,
+            batch_size=cfg.trainer.batch_size,
+            target_device=str(device),
+            load_test=False,  # 训练时不加载测试数据
         )
         train_loader = dataset_loaders["train_loader"]
         val_loader = dataset_loaders["val_loader"]
-        test_loader = dataset_loaders["test_loader"]
         scaler = dataset_loaders["scaler"]
         print("Dataset loaded.")
     except Exception as e:
@@ -358,6 +366,23 @@ def run_training(cfg: DictConfig):
         print("Warning: best_model.pth not found. Evaluating with the last model state (which might not be the best).")
 
     model.eval()
+
+    # 现在加载测试数据集
+    print("Loading test dataset for evaluation...")
+    try:
+        test_dataset = util.load_dataset(
+            dataset_dir=cfg.dataset.data_dir,
+            scaler_path=cfg.dataset.scaler_path,
+            batch_size=cfg.trainer.batch_size,
+            target_device=str(device),
+            load_test=True,  # 只加载测试数据
+        )
+        test_loader = test_dataset["test_loader"]
+        print("Test dataset loaded.")
+    except Exception as e:
+        print(f"测试数据加载失败: {e}")
+        return
+
     test_predictions_all_horizons = [[] for _ in range(cfg.dataset.forecast_len)]
     test_targets_all_horizons = [[] for _ in range(cfg.dataset.forecast_len)]
 
@@ -422,6 +447,15 @@ def run_training(cfg: DictConfig):
     print(f"\nBest validation RMSE achieved during training: {trainer.best_val_rmse:.4f}")
     print(f"Full results saved to: {hydra_output_dir}")
 
+    # 最后清理内存
+    if torch.cuda.is_available():
+        print("Cleaning up CUDA memory...")
+        model = model.cpu()
+        del model, train_loader, val_loader, test_loader, scaler
+        torch.cuda.empty_cache()
+        gc.collect()
+        print("Memory cleanup complete")
+
     return trainer.best_val_rmse  # 返回最佳验证RMSE，用于Optuna优化
 
 
@@ -429,12 +463,24 @@ def run_training(cfg: DictConfig):
 def main(cfg: DictConfig) -> None:
     """Hydra主函数"""
     print("=== tecGPT Training with Hydra ===")
+
+    # 启用内存优化
+    if cfg.device == "cuda" and not cfg.model.get("enable_gradient_checkpointing_llm", False):
+        print("Automatically enabling gradient checkpointing for better memory efficiency")
+        cfg.model.enable_gradient_checkpointing_llm = True
+
+    # 当使用Optuna时，自动减小批量大小以节省内存
+    if cfg.get("use_optuna", False) and cfg.trainer.batch_size > 4:
+        original_batch_size = cfg.trainer.batch_size
+        cfg.trainer.batch_size = min(cfg.trainer.batch_size, 4)  # 限制为最大4
+        print(f"Optuna mode detected: Reducing batch size from {original_batch_size} to {cfg.trainer.batch_size} to save memory")
+
     print(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
 
     # 初始化wandb
     if cfg.wandb.enable:
         hydra_output_dir = HydraConfig.get().runtime.output_dir
-
+        wandb.login(key="b5cc72abb4a307ad59f85bd6e32cb2a636769051")
         wandb.init(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
@@ -455,11 +501,20 @@ def main(cfg: DictConfig) -> None:
             wandb.run.summary["final_best_val_rmse"] = best_val_rmse
             wandb.finish()
 
+        # 最终清理内存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+
     except Exception as e:
         print(f"Training failed with error: {e}")
         print(f"Traceback: {traceback.format_exc()}")
         if cfg.wandb.enable and wandb.run is not None:
             wandb.finish()
+        # 出错时也清理内存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
         raise
 
 
