@@ -132,6 +132,7 @@ wandb/
 processed_tec_data/
 logs/
 eval_results/
+outputs/
 *.npz
 *.pkl
 *.hdf5

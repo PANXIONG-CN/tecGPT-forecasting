@@ -281,6 +281,7 @@ def create_model(cfg: DictConfig):
             tec_feat_dim=cfg.dataset.tec_feat_dim,
             sw_feat_dim=cfg.dataset.sw_feat_dim,
             time_feat_dim=cfg.dataset.time_feat_dim,
+            use_time_features=cfg.dataset.get("use_time_features", True),  # 从数据集配置读取
             d_embed=cfg.model.d_embed,
             d_llm=cfg.model.d_llm,
             llm_model_local_path=cfg.model.local_gpt2_path,
@@ -466,10 +467,71 @@ def run_training(cfg: DictConfig):
     return trainer.best_val_rmse  # 返回最佳验证RMSE，用于Optuna优化
 
 
+def extract_dataset_version_from_config(cfg):
+    """从配置中提取数据集版本信息"""
+    # 检查是否使用了特定的数据集配置
+    dataset_config_name = HydraConfig.get().job.config_name
+    dataset_choice = None
+
+    # 从Hydra配置中获取当前选择的dataset
+    if hasattr(cfg, "defaults"):
+        for default in cfg.defaults:
+            if isinstance(default, dict) and "dataset" in default:
+                dataset_choice = default["dataset"]
+                break
+
+    # 如果没有找到，尝试从HydraConfig获取
+    if not dataset_choice:
+        hydra_cfg = HydraConfig.get()
+        if hasattr(hydra_cfg, "runtime") and hasattr(hydra_cfg.runtime, "choices"):
+            dataset_choice = hydra_cfg.runtime.choices.get("dataset")
+
+    # 检查是否是特定数据集配置（以tec_data_specific_开头）
+    if dataset_choice and dataset_choice.startswith("tec_data_specific_"):
+        dataset_version = dataset_choice.replace("tec_data_specific_", "")
+        print(f"检测到特定数据集配置: {dataset_choice}")
+        print(f"数据集版本: {dataset_version}")
+        return dataset_version
+
+    # 如果是基础配置，尝试从数据路径中推断
+    if hasattr(cfg.dataset, "data_dir") and cfg.dataset.data_dir != "./processed_tec_data":
+        data_dir = cfg.dataset.data_dir.rstrip("/")
+        if "processed_tec_data/" in data_dir:
+            dataset_version = data_dir.split("processed_tec_data/")[-1]
+            if dataset_version:
+                print(f"从数据目录推断数据集版本: {dataset_version}")
+                return dataset_version
+
+    return None
+
+
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     """Hydra主函数"""
     print("=== tecGPT Training with Hydra ===")
+
+    # 提取数据集版本信息并设置输出目录
+    dataset_version = extract_dataset_version_from_config(cfg)
+
+    if dataset_version:
+        # 动态设置包含数据集版本信息的输出目录
+        from hydra.core.hydra_config import HydraConfig
+
+        hydra_cfg = HydraConfig.get()
+
+        # 获取当前时间信息
+        current_time = datetime.now()
+        date_str = current_time.strftime("%Y-%m-%d")
+        time_str = current_time.strftime("%H-%M-%S")
+
+        # 构建新的输出目录路径
+        new_output_dir = f"./logs/{cfg.project_name}/{cfg.model.model_name}/{date_str}/{time_str}-{dataset_version}"
+
+        # 更新Hydra的输出目录
+        hydra_cfg.runtime.output_dir = new_output_dir
+        os.makedirs(new_output_dir, exist_ok=True)
+
+        print(f"输出目录已设置为: {new_output_dir}")
 
     # 启用内存优化
     if cfg.device == "cuda" and not cfg.model.get("enable_gradient_checkpointing_llm", False):

@@ -1,7 +1,7 @@
 # conf/config.yaml
 defaults:
   - model: tecGPT        # 默认模型
-  - dataset: tec_data_v1 # 默认数据集配置
+  - dataset: tec_data_basic # 默认使用基础配置（预处理时）或特定配置（训练时）
   - trainer: default     # 默认训练器配置
   - sweeper: basic_optuna # 默认Optuna配置 (如果使用)
   - _self_ # 允许在此文件中直接定义参数
@@ -13,6 +13,7 @@ seed: 42
 device: "cuda" # 全局设备设置
 
 # 工作目录设置 (Hydra会自动创建输出目录)
+# 默认的输出目录，可以通过 hydra.run.dir 参数动态覆盖
 hydra:
   run:
     dir: ./logs/${project_name}/${model.model_name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

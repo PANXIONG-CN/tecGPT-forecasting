@@ -1,0 +1,8 @@
+# conf/config_preprocess.yaml
+defaults:
+  - dataset: tec_data_basic
+  - _self_
+
+# 预处理特定设置
+hdf5_dir: "data_preparation"  # HDF5文件所在目录
+seed: 42 

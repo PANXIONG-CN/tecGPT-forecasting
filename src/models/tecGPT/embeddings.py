@@ -112,19 +112,28 @@ class SpaceWeatherEmbedding(nn.Module):
 
 
 class FusionLayer(nn.Module):
-    def __init__(self, d_embed_total, d_llm, dropout=0.1):  # d_embed_total = 4 * d_embed
+    def __init__(self, d_embed_total, d_llm, dropout=0.1):
         super().__init__()
         self.fusion_mlp = nn.Sequential(
             nn.Linear(d_embed_total, d_llm * 2), nn.GELU(), nn.LayerNorm(d_llm * 2), nn.Dropout(dropout), nn.Linear(d_llm * 2, d_llm)
         )
-        # 移除了额外的 norm 和 activation，让LLM的第一层LN处理
 
-    def forward(self, ep, et, es, esw):
-        # ep, et, esw: [B, N, D_embed]
-        # es: [1, N, D_embed]
-        B = ep.size(0)
-        es_broadcast = es.expand(B, -1, -1)
+    def forward(self, *embeddings):
+        # embeddings: 可变数量的嵌入张量，每个都是 [B, N, D_embed] 或 [1, N, D_embed]
+        if len(embeddings) == 0:
+            raise ValueError("At least one embedding is required")
 
-        combined_embed = torch.cat([ep, et, es_broadcast, esw], dim=-1)
+        B = embeddings[0].size(0)
+
+        # 广播所有嵌入到相同的批次大小
+        broadcast_embeddings = []
+        for emb in embeddings:
+            if emb.size(0) == 1:  # 如果是 [1, N, D_embed]，广播到批次大小
+                broadcast_embeddings.append(emb.expand(B, -1, -1))
+            else:
+                broadcast_embeddings.append(emb)
+
+        # 连接所有嵌入
+        combined_embed = torch.cat(broadcast_embeddings, dim=-1)
         fused_embed = self.fusion_mlp(combined_embed)
         return fused_embed
