@@ -149,49 +149,51 @@ def load_scaler(scaler_path):
     return StandardScaler(scaler_path=scaler_path)
 
 
-def load_dataset(dataset_dir, scaler_path, batch_size=32, target_device=None, load_test=True):
+def load_dataset(dataset_dir, scaler_path, batch_size=32, target_device=None, load_test=True, load_train_val=True):
     """Load the preprocessed TEC dataset."""
     print(f"Loading preprocessed data from: {dataset_dir}")
 
-    # 加载训练数据
-    try:
-        train_data = np.load(os.path.join(dataset_dir, "train.npz"))
-        train_x = train_data["x"]
-        train_y = train_data["y"]
-        print(f"Loaded train data: x shape {train_x.shape}, y shape {train_y.shape}")
-    except Exception as e:
-        raise Exception(f"训练数据加载失败: {e}")
+    train_loader, val_loader = None, None
 
-    # 加载验证数据
-    try:
-        val_data = np.load(os.path.join(dataset_dir, "val.npz"))
-        val_x = val_data["x"]
-        val_y = val_data["y"]
-        print(f"Loaded val data: x shape {val_x.shape}, y shape {val_y.shape}")
-    except Exception as e:
-        raise Exception(f"验证数据加载失败: {e}")
+    # 加载训练和验证数据集（如果需要）
+    if load_train_val:
+        # 加载训练数据
+        try:
+            train_data = np.load(os.path.join(dataset_dir, "train.npz"))
+            train_x = train_data["x"]
+            train_y = train_data["y"]
+            print(f"Loaded train data: x shape {train_x.shape}, y shape {train_y.shape}")
+            # 创建训练数据加载器
+            train_loader = DataLoader({"x": train_x, "y": train_y}, batch_size=batch_size, shuffle=True)
+        except Exception as e:
+            raise Exception(f"训练数据加载失败: {e}")
+
+        # 加载验证数据
+        try:
+            val_data = np.load(os.path.join(dataset_dir, "val.npz"))
+            val_x = val_data["x"]
+            val_y = val_data["y"]
+            print(f"Loaded val data: x shape {val_x.shape}, y shape {val_y.shape}")
+            # 创建验证数据加载器
+            val_loader = DataLoader({"x": val_x, "y": val_y}, batch_size=batch_size, shuffle=False)
+        except Exception as e:
+            raise Exception(f"验证数据加载失败: {e}")
 
     # 有条件地加载测试数据
-    test_x, test_y = None, None
+    test_loader = None
     if load_test:
         try:
             test_data = np.load(os.path.join(dataset_dir, "test.npz"))
             test_x = test_data["x"]
             test_y = test_data["y"]
             print(f"Loaded test data: x shape {test_x.shape}, y shape {test_y.shape}")
+            # 创建测试数据加载器
+            test_loader = DataLoader({"x": test_x, "y": test_y}, batch_size=batch_size, shuffle=False)
         except Exception as e:
             print(f"Warning: 测试数据加载失败: {e}")
 
     # 加载标准化器
     scaler = StandardScaler(scaler_path=scaler_path)
-
-    # 创建数据加载器
-    train_loader = DataLoader({"x": train_x, "y": train_y}, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader({"x": val_x, "y": val_y}, batch_size=batch_size, shuffle=False)
-
-    test_loader = None
-    if load_test and test_x is not None and test_y is not None:
-        test_loader = DataLoader({"x": test_x, "y": test_y}, batch_size=batch_size, shuffle=False)
 
     return {"train_loader": train_loader, "val_loader": val_loader, "test_loader": test_loader, "scaler": scaler}
 

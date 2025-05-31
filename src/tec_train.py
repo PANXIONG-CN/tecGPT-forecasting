@@ -367,6 +367,12 @@ def run_training(cfg: DictConfig):
 
     model.eval()
 
+    # 释放训练和验证数据集以节省内存
+    print("Releasing training and validation datasets to free memory...")
+    del train_loader, val_loader
+    torch.cuda.empty_cache()
+    gc.collect()
+
     # 现在加载测试数据集
     print("Loading test dataset for evaluation...")
     try:
@@ -376,6 +382,7 @@ def run_training(cfg: DictConfig):
             batch_size=cfg.trainer.batch_size,
             target_device=str(device),
             load_test=True,  # 只加载测试数据
+            load_train_val=False,  # 不加载训练和验证数据
         )
         test_loader = test_dataset["test_loader"]
         print("Test dataset loaded.")
@@ -451,7 +458,7 @@ def run_training(cfg: DictConfig):
     if torch.cuda.is_available():
         print("Cleaning up CUDA memory...")
         model = model.cpu()
-        del model, train_loader, val_loader, test_loader, scaler
+        del model, test_loader, scaler
         torch.cuda.empty_cache()
         gc.collect()
         print("Memory cleanup complete")
