@@ -27,6 +27,15 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
 
+
+def get_output_dir(cfg):
+    """获取输出目录，优先使用自定义目录"""
+    if hasattr(cfg, "custom_output_dir"):
+        return cfg.custom_output_dir
+    else:
+        return HydraConfig.get().runtime.output_dir
+
+
 # 将项目根目录添加到Python路径中
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -165,7 +174,7 @@ class SimpleTrainer:
 
     def train(self, train_loader, val_loader):
         training_history = []
-        hydra_output_dir = HydraConfig.get().runtime.output_dir
+        output_dir = get_output_dir(self.cfg)
 
         if not self.use_ddp or self.rank == 0:
             print(f"Starting training for {self.cfg.trainer.epochs} epochs...")
@@ -234,9 +243,9 @@ class SimpleTrainer:
 
                     # 保存模型时，如果使用DDP，保存module
                     if self.use_ddp:
-                        torch.save(self.model.module.state_dict(), os.path.join(hydra_output_dir, "best_model.pth"))
+                        torch.save(self.model.module.state_dict(), os.path.join(output_dir, "best_model.pth"))
                     else:
-                        torch.save(self.model.state_dict(), os.path.join(hydra_output_dir, "best_model.pth"))
+                        torch.save(self.model.state_dict(), os.path.join(output_dir, "best_model.pth"))
 
                     # 记录最佳模型到wandb
                     if self.use_wandb:
@@ -303,9 +312,9 @@ def run_training(cfg: DictConfig):
     """主训练函数"""
     seed_environment(cfg.seed)
 
-    # 获取Hydra输出目录
-    hydra_output_dir = HydraConfig.get().runtime.output_dir
-    print(f"Logs and models will be saved to: {hydra_output_dir}")
+    # 获取输出目录
+    output_dir = get_output_dir(cfg)
+    print(f"Logs and models will be saved to: {output_dir}")
 
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -361,7 +370,7 @@ def run_training(cfg: DictConfig):
     # --- Final Evaluation on Test Set ---
     print("\nLoading best model for final evaluation on test set...")
     try:
-        model.load_state_dict(torch.load(os.path.join(hydra_output_dir, "best_model.pth"), map_location=device))
+        model.load_state_dict(torch.load(os.path.join(output_dir, "best_model.pth"), map_location=device))
         print("Best model loaded for testing.")
     except FileNotFoundError:
         print("Warning: best_model.pth not found. Evaluating with the last model state (which might not be the best).")
@@ -430,9 +439,9 @@ def run_training(cfg: DictConfig):
                 }
             )
 
-    pd.DataFrame(training_history).to_csv(os.path.join(hydra_output_dir, "training_log.csv"), index=False)
+    pd.DataFrame(training_history).to_csv(os.path.join(output_dir, "training_log.csv"), index=False)
     df_test_results = pd.DataFrame(test_results_per_horizon)
-    df_test_results.to_csv(os.path.join(hydra_output_dir, "test_results_per_horizon.csv"), index=False)
+    df_test_results.to_csv(os.path.join(output_dir, "test_results_per_horizon.csv"), index=False)
 
     avg_test_metrics = df_test_results.drop(columns=["horizon"]).mean()
     print("\n--- Average Test Results (All Horizons) ---")
@@ -453,7 +462,7 @@ def run_training(cfg: DictConfig):
         )
 
     print(f"\nBest validation RMSE achieved during training: {trainer.best_val_rmse:.4f}")
-    print(f"Full results saved to: {hydra_output_dir}")
+    print(f"Full results saved to: {output_dir}")
 
     # 最后清理内存
     if torch.cuda.is_available():
@@ -516,6 +525,7 @@ def main(cfg: DictConfig) -> None:
     if dataset_version:
         # 动态设置包含数据集版本信息的输出目录
         from hydra.core.hydra_config import HydraConfig
+        from omegaconf import open_dict
 
         hydra_cfg = HydraConfig.get()
 
@@ -527,9 +537,12 @@ def main(cfg: DictConfig) -> None:
         # 构建新的输出目录路径
         new_output_dir = f"./logs/{cfg.project_name}/{cfg.model.model_name}/{date_str}/{time_str}-{dataset_version}"
 
-        # 更新Hydra的输出目录
-        hydra_cfg.runtime.output_dir = new_output_dir
+        # 不要直接修改Hydra配置，而是创建目录并记录路径
         os.makedirs(new_output_dir, exist_ok=True)
+
+        # 使用open_dict上下文管理器临时允许添加新键
+        with open_dict(cfg):
+            cfg.custom_output_dir = new_output_dir
 
         print(f"输出目录已设置为: {new_output_dir}")
 
@@ -548,7 +561,7 @@ def main(cfg: DictConfig) -> None:
 
     # 初始化wandb
     if cfg.wandb.enable:
-        hydra_output_dir = HydraConfig.get().runtime.output_dir
+        output_dir = get_output_dir(cfg)
         wandb.login(key="b5cc72abb4a307ad59f85bd6e32cb2a636769051")
         wandb.init(
             project=cfg.wandb.project,
@@ -556,7 +569,7 @@ def main(cfg: DictConfig) -> None:
             name=cfg.run_name,
             group=cfg.wandb.group,
             config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True),
-            dir=hydra_output_dir,
+            dir=output_dir,
             job_type="train",
         )
         print("W&B initialized")
