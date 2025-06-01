@@ -16,11 +16,12 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import optuna
-import wandb
 import json
 from datetime import datetime
 import traceback
 import gc
+import logging
+import sys
 
 # Hydra imports
 import hydra
@@ -84,7 +85,6 @@ class SimpleTrainer:
         self.device = device
         self.best_val_rmse = float("inf")
         self.epochs_no_improve = 0
-        self.use_wandb = cfg.wandb.enable and (not self.use_ddp or self.rank == 0)
 
         # 如果启用混合精度训练，初始化GradScaler
         self.use_amp = cfg.trainer.use_amp
@@ -188,26 +188,6 @@ class SimpleTrainer:
 
             epoch_duration = time.time() - epoch_start_time
 
-            # 记录到wandb
-            if self.use_wandb:
-                wandb.log(
-                    {
-                        "epoch": epoch,
-                        "train_rmse": train_loss,
-                        "train_mae": train_metrics["mae"],
-                        "train_rmse_metric": train_metrics["rmse"],
-                        "train_mape": train_metrics["mape"],
-                        "train_wmape": train_metrics["wmape"],
-                        "val_rmse": val_loss,
-                        "val_mae": val_metrics["mae"],
-                        "val_rmse_metric": val_metrics["rmse"],
-                        "val_mape": val_metrics["mape"],
-                        "val_wmape": val_metrics["wmape"],
-                        "learning_rate": self.optimizer.param_groups[0]["lr"],
-                        "epoch_time": epoch_duration,
-                    }
-                )
-
             # 只在主进程中打印信息和保存模型
             if not self.use_ddp or self.rank == 0:
                 if epoch % self.cfg.trainer.print_every_epochs == 0 or epoch == 1:
@@ -246,11 +226,6 @@ class SimpleTrainer:
                         torch.save(self.model.module.state_dict(), os.path.join(output_dir, "best_model.pth"))
                     else:
                         torch.save(self.model.state_dict(), os.path.join(output_dir, "best_model.pth"))
-
-                    # 记录最佳模型到wandb
-                    if self.use_wandb:
-                        wandb.run.summary["best_val_rmse"] = self.best_val_rmse
-                        wandb.run.summary["best_epoch"] = epoch
 
                     self.epochs_no_improve = 0
                 else:
@@ -427,18 +402,6 @@ def run_training(cfg: DictConfig):
         test_results_per_horizon.append(horizon_results)
         print(f"Horizon {s_idx+1:02d} - MAE: {m_test[0]:.4f}, RMSE: {m_test[2]:.4f}, MAPE: {m_test[1]:.2f}%, WMAPE: {m_test[3]:.2f}%")
 
-        # 记录测试结果到wandb
-        if cfg.wandb.enable:
-            wandb.log(
-                {
-                    f"test_mae_h{s_idx+1}": m_test[0],
-                    f"test_rmse_h{s_idx+1}": m_test[2],
-                    f"test_mape_h{s_idx+1}": m_test[1],
-                    f"test_wmape_h{s_idx+1}": m_test[3],
-                    "horizon": s_idx + 1,
-                }
-            )
-
     pd.DataFrame(training_history).to_csv(os.path.join(output_dir, "training_log.csv"), index=False)
     df_test_results = pd.DataFrame(test_results_per_horizon)
     df_test_results.to_csv(os.path.join(output_dir, "test_results_per_horizon.csv"), index=False)
@@ -449,17 +412,6 @@ def run_training(cfg: DictConfig):
     print(f"Avg RMSE:  {avg_test_metrics['rmse']:.4f}")
     print(f"Avg MAPE:  {avg_test_metrics['mape']:.2f}%")
     print(f"Avg WMAPE: {avg_test_metrics['wmape']:.2f}%")
-
-    # 记录平均测试指标到wandb
-    if cfg.wandb.enable:
-        wandb.log(
-            {
-                "test_avg_mae": avg_test_metrics["mae"],
-                "test_avg_rmse": avg_test_metrics["rmse"],
-                "test_avg_mape": avg_test_metrics["mape"],
-                "test_avg_wmape": avg_test_metrics["wmape"],
-            }
-        )
 
     print(f"\nBest validation RMSE achieved during training: {trainer.best_val_rmse:.4f}")
     print(f"Full results saved to: {output_dir}")
@@ -517,7 +469,6 @@ def extract_dataset_version_from_config(cfg):
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     """Hydra主函数"""
-    print("=== tecGPT Training with Hydra ===")
 
     # 提取数据集版本信息并设置输出目录
     dataset_version = extract_dataset_version_from_config(cfg)
@@ -546,42 +497,36 @@ def main(cfg: DictConfig) -> None:
 
         print(f"输出目录已设置为: {new_output_dir}")
 
+    # ---- 配置日志记录以捕获print输出 ----
+    output_dir_for_this_run = get_output_dir(cfg)
+    os.makedirs(output_dir_for_this_run, exist_ok=True)
+
+    log_file_path = os.path.join(output_dir_for_this_run, "training_run.log")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.FileHandler(log_file_path), logging.StreamHandler(sys.stdout)],  # 输出到文件  # 仍然输出到控制台
+    )
+    logging.info("=== tecGPT Training with Hydra ===")
+    logging.info(f"Output directory for this run: {output_dir_for_this_run}")
+    # ---- 日志配置结束 ----
+
     # 启用内存优化
     if cfg.device == "cuda" and not cfg.model.get("enable_gradient_checkpointing_llm", False):
-        print("Automatically enabling gradient checkpointing for better memory efficiency")
+        logging.info("Automatically enabling gradient checkpointing for better memory efficiency")
         cfg.model.enable_gradient_checkpointing_llm = True
 
     # 当使用Optuna时，自动减小批量大小以节省内存
     if cfg.get("use_optuna", False) and cfg.trainer.batch_size > 4:
         original_batch_size = cfg.trainer.batch_size
         cfg.trainer.batch_size = min(cfg.trainer.batch_size, 4)  # 限制为最大4
-        print(f"Optuna mode detected: Reducing batch size from {original_batch_size} to {cfg.trainer.batch_size} to save memory")
+        logging.info(f"Optuna mode detected: Reducing batch size from {original_batch_size} to {cfg.trainer.batch_size} to save memory")
 
-    print(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
-
-    # 初始化wandb
-    if cfg.wandb.enable:
-        output_dir = get_output_dir(cfg)
-        wandb.login(key="b5cc72abb4a307ad59f85bd6e32cb2a636769051")
-        wandb.init(
-            project=cfg.wandb.project,
-            entity=cfg.wandb.entity,
-            name=cfg.run_name,
-            group=cfg.wandb.group,
-            config=OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True),
-            dir=output_dir,
-            job_type="train",
-        )
-        print("W&B initialized")
+    logging.info(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
 
     try:
         # 运行训练
         best_val_rmse = run_training(cfg)
-
-        # 如果使用wandb，记录最终结果并关闭
-        if cfg.wandb.enable:
-            wandb.run.summary["final_best_val_rmse"] = best_val_rmse
-            wandb.finish()
 
         # 最终清理内存
         if torch.cuda.is_available():
@@ -589,12 +534,11 @@ def main(cfg: DictConfig) -> None:
             gc.collect()
 
     except Exception as e:
-        print(f"Training failed with error: {e}")
-        print(f"Traceback: {traceback.format_exc()}")
-        if cfg.wandb.enable and wandb.run is not None:
-            wandb.finish()
+        logging.error(f"Training failed with error: {e}", exc_info=True)
+
         # 出错时也清理内存
         if torch.cuda.is_available():
+            logging.info("Cleaning up CUDA memory after error")
             torch.cuda.empty_cache()
             gc.collect()
         raise
@@ -604,4 +548,10 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
     script_start_time = time.time()
     main()
-    print(f"\nTotal script execution time: {(time.time() - script_start_time)/60:.2f} minutes")
+    total_time = (time.time() - script_start_time) / 60
+    print(f"\nTotal script execution time: {total_time:.2f} minutes")
+    # 如果logging已配置，也记录到日志
+    try:
+        logging.info(f"Total script execution time: {total_time:.2f} minutes")
+    except:
+        pass
