@@ -46,7 +46,7 @@ if project_root not in sys.path:
 from utils import util
 from models.tecGPT.tec_gpt import tecGPT
 from models import get_model_class, MODEL_REGISTRY
-from ranger21 import Ranger
+from models.tecGPT.ranger21 import Ranger
 from data_preparation.preprocess_data import NodeScaler, FeatureScaler
 
 # 增加CUDA内存配置，尝试避免内存碎片化

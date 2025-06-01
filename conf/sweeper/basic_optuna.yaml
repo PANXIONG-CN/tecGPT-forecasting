@@ -41,9 +41,10 @@ sweeper:
 # Parameters to optimize
 params:
   trainer.learning_rate: "loguniform(1e-5, 1e-3)"
-  model.d_embed: "categorical(64, 128, 192)"       # 针对 tecGPT
-  model.llm_layers_to_use: "int(3, 6)"             # 针对 tecGPT
-  model.U_unfrozen_mha: "int(1, 3)"                # 针对 tecGPT
+  trainer.batch_size: "categorical(8, 12, 16, 32, 48)" # 新增批量大小优化
+  model.d_embed: "categorical(128, 192, 256)"       # 针对 tecGPT，增大范围
+  model.llm_layers_to_use: "int(4, 8)"             # 针对 tecGPT，增大范围
+  model.U_unfrozen_mha: "int(2, 4)"                # 针对 tecGPT，增大范围
   trainer.optimizer_type: "categorical('AdamW', 'Ranger')"
   # Add other model-specific or trainer-specific parameters here
   # Example for TCN:

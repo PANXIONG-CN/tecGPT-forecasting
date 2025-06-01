@@ -1,0 +1,27 @@
+# conf/dataset/tec_data_specific_tr13-21_v22-23_t23-25_h36_f12_tf_off.yaml
+# 此配置文件指向特定的预处理数据版本
+# 由预处理脚本自动生成，请勿手动编辑
+
+data_dir: ./processed_tec_data/tr13-21_v22-23_t23-25_h36_f12_tf_off/
+scaler_path: ./processed_tec_data/tr13-21_v22-23_t23-25_h36_f12_tf_off/scaler.pkl
+num_nodes: 2911
+n_lat: 41
+n_lon: 71
+history_len: 36
+forecast_len: 12
+use_time_features: false
+tec_feat_dim: 1
+sw_feat_dim: 5
+time_feat_dim: 6
+train_start_year: 2013
+train_start_month: 1
+train_end_year: 2021
+train_end_month: 12
+val_start_year: 2022
+val_start_month: 1
+val_end_year: 2023
+val_end_month: 6
+test_start_year: 2023
+test_start_month: 7
+test_end_year: 2025
+test_end_month: 4
