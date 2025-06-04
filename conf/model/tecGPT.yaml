@@ -6,8 +6,8 @@ model_name: tecGPT
 d_embed: 128
 d_llm: 768
 local_gpt2_path: "/home/panxiong/tecGPT-forecasting/src/models/tecGPT/gpt2"
-llm_layers_to_use: 6
+llm_layers_to_use: 2 # 降低默认层数以节省内存
 U_unfrozen_mha: 2
 dropout_embed: 0.1
 dropout_llm_out: 0.1
-enable_gradient_checkpointing_llm: false 
+enable_gradient_checkpointing_llm: true # 默认启用梯度检查点 

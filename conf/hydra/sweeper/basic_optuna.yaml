@@ -1,10 +1,9 @@
-# conf/sweeper/basic_optuna.yaml
+# @package hydra/sweeper
 # Optuna sweeper configuration for Hydra
 # To run Optuna sweep: python your_script.py -m model=tecGPT trainer.epochs=10 ...
 # -m flag enables multirun
 # You can override parameters for the sweep directly from the command line.
 
-# Sweeper class
 _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
 # For details on Optuna Sweeper configuration, see:
 # https://hydra.cc/docs/plugins/optuna_sweeper/

@@ -21,21 +21,12 @@ from datetime import datetime
 import traceback
 import gc
 import logging
-import sys
 
 # Hydra imports
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from hydra.core.hydra_config import HydraConfig
-
-
-def get_output_dir(cfg):
-    """获取输出目录，优先使用自定义目录"""
-    if hasattr(cfg, "custom_output_dir"):
-        return cfg.custom_output_dir
-    else:
-        return HydraConfig.get().runtime.output_dir
-
+from hydra.types import RunMode
 
 # 将项目根目录添加到Python路径中
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -50,9 +41,77 @@ from models.tecGPT.ranger21 import Ranger
 from data_preparation.preprocess_data import NodeScaler, FeatureScaler
 
 # 增加CUDA内存配置，尝试避免内存碎片化
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:True"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:64,expandable_segments:True"
+# 添加更多内存管理选项
+os.environ["CUDA_LAUNCH_BLOCKING"] = "0"  # 异步执行以提高性能
 
-torch.cuda.empty_cache()
+# 清理CUDA缓存
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    # 设置内存分数以避免OOM
+    torch.cuda.set_per_process_memory_fraction(0.9)  # 使用90%的GPU内存
+
+
+def get_dataset_version_for_path(cfg: DictConfig) -> str:
+    """
+    辅助函数，用于从配置中提取一个用于路径的数据集标识符。
+    优先使用 cfg.dataset.version_id (如果已由 preprocess_data_hydra.py 生成并写入特定数据集配置)
+    其次尝试 cfg.dataset_version_id (如果手动设置在cfg顶层)
+    否则尝试从 cfg.dataset.data_dir 推断。
+    """
+    # 优先级1: 特定数据集配置文件中明确写入的 version_id (由预处理脚本生成)
+    if hasattr(cfg.dataset, "version_id") and cfg.dataset.version_id:
+        return str(cfg.dataset.version_id)
+
+    # 优先级2: 如果在主配置的dataset部分直接定义了version_id
+    dataset_config_name = HydraConfig.get().runtime.choices.get("dataset", "unknown")
+    if dataset_config_name.startswith("tec_data_specific_"):
+        # 从cfg.dataset.data_dir推断，因为version_id应该在cfg.dataset里，而不是从文件名猜测
+        if hasattr(cfg.dataset, "data_dir"):
+            # 例如 data_dir: ./processed_tec_data/tr13-21_v22-23_t23-25_h36_f12_tf_off/
+            data_dir_parts = cfg.dataset.data_dir.strip("/").split("/")
+            if len(data_dir_parts) > 0 and data_dir_parts[-1].startswith("tr"):
+                return data_dir_parts[-1]
+
+    # 优先级3: 从 cfg.dataset.data_dir 推断（作为后备）
+    if hasattr(cfg.dataset, "data_dir"):
+        data_dir_parts = cfg.dataset.data_dir.strip("/").split("/")
+        if len(data_dir_parts) > 1 and data_dir_parts[-2] == "processed_tec_data":
+            version_candidate = data_dir_parts[-1]
+            if "tr" in version_candidate and ("_v" in version_candidate or "_h" in version_candidate):
+                return version_candidate
+
+    return "unknown_dataset_version"
+
+
+def get_effective_output_dir(cfg: DictConfig) -> str:
+    """
+    根据运行模式决定最终的输出目录
+    """
+    hydra_cfg = HydraConfig.get()
+
+    if hydra_cfg.mode == RunMode.MULTIRUN and cfg.get("use_optuna", False):
+        # Optuna sweep trial: Hydra自动管理输出目录 (e.g., hydra.sweep.dir/hydra.sweep.subdir)
+        # hydra_cfg.runtime.output_dir 已经是 trial_X 目录
+        return hydra_cfg.runtime.output_dir
+    else:
+        # 单次运行 (包括 use_optuna=True 但没有 --multirun, 或者 use_optuna=False)
+        base_log_dir = f"./logs/{cfg.project_name}/{cfg.model.model_name}/SINGLE_RUNS"
+
+        current_time = datetime.now()
+        # 使用更短的时间戳格式，避免在路径中出现冒号
+        time_str = current_time.strftime("%Y-%m-%d_%H-%M-%S")
+
+        dataset_version_str = get_dataset_version_for_path(cfg)
+
+        run_type_prefix = "optuna_single_trial" if cfg.get("use_optuna", False) else "run"
+
+        # 确保路径组件不包含非法字符，特别是 dataset_version_str
+        dataset_version_str_sanitized = dataset_version_str.replace("/", "_").replace(":", "-")
+
+        final_dir = os.path.join(base_log_dir, f"{time_str}_{run_type_prefix}_{dataset_version_str_sanitized}")
+        return final_dir
 
 
 def seed_environment(seed):
@@ -62,15 +121,63 @@ def seed_environment(seed):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    print(f"Environment seeded with {seed}")
+
+
+def setup_optuna_storage(config):
+    """确保 Optuna 存储路径有效"""
+    if config.use_optuna and config.optuna_storage and config.optuna_storage.startswith("sqlite:///"):
+        # 提取数据库文件路径
+        db_path = config.optuna_storage.replace("sqlite:///", "")
+        # 确保目录存在
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        print(f"Optuna SQLite 存储目录已创建: {os.path.dirname(os.path.abspath(db_path))}")
+    return config.optuna_storage
+
+
+def setup_optuna_study(config):
+    """设置 Optuna study 并确保 SQLite 存储正常工作"""
+    try:
+        # 确保存储目录存在
+        if config.optuna_storage and config.optuna_storage.startswith("sqlite:///"):
+            db_path = config.optuna_storage.replace("sqlite:///", "")
+            os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+
+        # 创建存储对象
+        storage = None
+        if config.optuna_storage:
+            storage = optuna.storages.RDBStorage(
+                url=config.optuna_storage, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
+            )
+            logging.info(f"成功创建 Optuna RDBStorage: {config.optuna_storage}")
+
+        # 创建 study
+        study = optuna.create_study(
+            study_name=config.optuna_study_name,
+            storage=storage,
+            direction="minimize",
+            load_if_exists=True,
+            sampler=optuna.samplers.TPESampler(seed=config.seed),
+        )
+
+        logging.info(f"成功创建 Optuna study: {config.optuna_study_name}")
+        return study
+
+    except Exception as e:
+        logging.error(f"创建 Optuna study 失败: {e}")
+        logging.warning("回退到内存存储...")
+
+        # 回退到内存存储
+        study = optuna.create_study(study_name=config.optuna_study_name, direction="minimize", sampler=optuna.samplers.TPESampler(seed=config.seed))
+        return study
 
 
 class SimpleTrainer:
     """一个简化的训练器类，用于组织训练逻辑"""
 
-    def __init__(self, model, scaler, optimizer, scheduler, loss_fn, cfg, device, rank=0):
+    def __init__(self, model, scaler, optimizer, scheduler, loss_fn, cfg, device, logger, rank=0):
         self.model = model.to(device)
         self.cfg = cfg
+        self.logger = logger
 
         # 如果使用DDP，包装模型
         self.use_ddp = cfg.get("use_ddp", False)
@@ -88,10 +195,10 @@ class SimpleTrainer:
 
         # 如果启用混合精度训练，初始化GradScaler
         self.use_amp = cfg.trainer.use_amp
-        if self.use_amp:
+        if self.use_amp and str(self.device) != "cpu":
             self.grad_scaler = GradScaler()
             if rank == 0:
-                print("Using Automatic Mixed Precision (AMP) training")
+                self.logger.info("Using Automatic Mixed Precision (AMP) training.")
 
     def _run_epoch(self, dataloader, is_training=True):
         if is_training:
@@ -174,10 +281,10 @@ class SimpleTrainer:
 
     def train(self, train_loader, val_loader):
         training_history = []
-        output_dir = get_output_dir(self.cfg)
+        current_output_dir = self.cfg.output_dir_for_this_run
 
         if not self.use_ddp or self.rank == 0:
-            print(f"Starting training for {self.cfg.trainer.epochs} epochs...")
+            self.logger.info(f"Starting training for {self.cfg.trainer.epochs} epochs...")
 
         for epoch in range(1, self.cfg.trainer.epochs + 1):
             self.current_epoch = epoch
@@ -191,7 +298,7 @@ class SimpleTrainer:
             # 只在主进程中打印信息和保存模型
             if not self.use_ddp or self.rank == 0:
                 if epoch % self.cfg.trainer.print_every_epochs == 0 or epoch == 1:
-                    print(
+                    self.logger.info(
                         f"Epoch {epoch}/{self.cfg.trainer.epochs} [{epoch_duration:.2f}s] - "
                         f"Train RMSE: {train_loss:.4f} (MAE metric: {train_metrics['mae']:.4f}), "
                         f"Val RMSE: {val_loss:.4f} (MAE metric: {val_metrics['mae']:.4f})"
@@ -218,21 +325,22 @@ class SimpleTrainer:
                     self.scheduler.step(val_loss)
 
                 if val_loss < self.best_val_rmse:
-                    print(f"Validation RMSE improved ({self.best_val_rmse:.4f} --> {val_loss:.4f}). Saving model...")
+                    self.logger.info(f"Validation RMSE improved ({self.best_val_rmse:.4f} --> {val_loss:.4f}). Saving model...")
                     self.best_val_rmse = val_loss
 
                     # 保存模型时，如果使用DDP，保存module
+                    model_save_path = os.path.join(current_output_dir, "best_model.pth")
                     if self.use_ddp:
-                        torch.save(self.model.module.state_dict(), os.path.join(output_dir, "best_model.pth"))
+                        torch.save(self.model.module.state_dict(), model_save_path)
                     else:
-                        torch.save(self.model.state_dict(), os.path.join(output_dir, "best_model.pth"))
+                        torch.save(self.model.state_dict(), model_save_path)
 
                     self.epochs_no_improve = 0
                 else:
                     self.epochs_no_improve += 1
-                    print(f"No improvement in validation RMSE for {self.epochs_no_improve} epochs.")
+                    self.logger.info(f"No improvement in validation RMSE for {self.epochs_no_improve} epochs.")
                     if self.epochs_no_improve >= self.cfg.trainer.patience:
-                        print(f"Early stopping triggered at epoch {epoch}.")
+                        self.logger.info(f"Early stopping triggered at epoch {epoch}.")
                         break
 
             # 如果使用DDP，需要同步所有进程是否需要早停
@@ -245,7 +353,7 @@ class SimpleTrainer:
             torch.cuda.empty_cache()
 
         if not self.use_ddp or self.rank == 0:
-            print(f"\nTraining finished. Best validation RMSE: {self.best_val_rmse:.4f}")
+            self.logger.info(f"\nTraining finished. Best validation RMSE: {self.best_val_rmse:.4f}")
         return training_history
 
 
@@ -253,7 +361,6 @@ def create_model(cfg: DictConfig):
     """模型工厂函数：根据Hydra配置创建相应的模型实例"""
     model_name = cfg.model.model_name
     model_class = get_model_class(model_name)
-    print(f"Creating model: {model_name}")
 
     if model_name == "tecGPT":
         model = model_class(
@@ -265,7 +372,7 @@ def create_model(cfg: DictConfig):
             tec_feat_dim=cfg.dataset.tec_feat_dim,
             sw_feat_dim=cfg.dataset.sw_feat_dim,
             time_feat_dim=cfg.dataset.time_feat_dim,
-            use_time_features=cfg.dataset.get("use_time_features", True),  # 从数据集配置读取
+            use_time_features=cfg.dataset.get("use_time_features", True),
             d_embed=cfg.model.d_embed,
             d_llm=cfg.model.d_llm,
             llm_model_local_path=cfg.model.local_gpt2_path,
@@ -283,16 +390,13 @@ def create_model(cfg: DictConfig):
     return model
 
 
-def run_training(cfg: DictConfig):
+def run_training(cfg: DictConfig, logger: logging.Logger):
     """主训练函数"""
     seed_environment(cfg.seed)
-
-    # 获取输出目录
-    output_dir = get_output_dir(cfg)
-    print(f"Logs and models will be saved to: {output_dir}")
+    logger.info(f"Environment seeded with {cfg.seed}")
 
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
 
     # 启用内存优化选项
     torch.backends.cudnn.benchmark = True
@@ -300,9 +404,9 @@ def run_training(cfg: DictConfig):
     # 确保CUDA缓存被清空
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        print("CUDA cache cleared")
+        logger.info("CUDA cache cleared")
 
-    print("Loading dataset...")
+    logger.info("Loading dataset...")
     try:
         dataset_loaders = util.load_dataset(
             dataset_dir=cfg.dataset.data_dir,
@@ -314,19 +418,19 @@ def run_training(cfg: DictConfig):
         train_loader = dataset_loaders["train_loader"]
         val_loader = dataset_loaders["val_loader"]
         scaler = dataset_loaders["scaler"]
-        print("Dataset loaded.")
+        logger.info("Dataset loaded.")
     except Exception as e:
-        print(f"数据加载失败: {e}")
-        return
+        logger.error(f"数据加载失败: {e}")
+        return float("inf")
 
-    print("Instantiating tecGPT model...")
+    logger.info("Instantiating tecGPT model...")
     try:
         model = create_model(cfg)
-        print(f"Model instantiated. Trainable parameters: {model.param_num(trainable_only=True):,}")
-        print(f"Model instantiated. Total parameters: {model.param_num(trainable_only=False):,}")
+        logger.info(f"Model instantiated. Trainable parameters: {model.param_num(trainable_only=True):,}")
+        logger.info(f"Model instantiated. Total parameters: {model.param_num(trainable_only=False):,}")
     except Exception as e:
-        print(f"模型初始化失败: {e}")
-        return
+        logger.error(f"模型初始化失败: {e}")
+        return float("inf")
 
     # 优化器
     if cfg.trainer.optimizer_type == "AdamW":
@@ -339,27 +443,27 @@ def run_training(cfg: DictConfig):
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", factor=0.5, patience=cfg.trainer.patience // 2, verbose=True)
     loss_fn = util.RMSE_torch
 
-    trainer = SimpleTrainer(model, scaler, optimizer, scheduler, loss_fn, cfg, device)
+    trainer = SimpleTrainer(model, scaler, optimizer, scheduler, loss_fn, cfg, device, logger)
     training_history = trainer.train(train_loader, val_loader)
 
     # --- Final Evaluation on Test Set ---
-    print("\nLoading best model for final evaluation on test set...")
+    logger.info("\nLoading best model for final evaluation on test set...")
     try:
-        model.load_state_dict(torch.load(os.path.join(output_dir, "best_model.pth"), map_location=device))
-        print("Best model loaded for testing.")
+        model.load_state_dict(torch.load(os.path.join(cfg.output_dir_for_this_run, "best_model.pth"), map_location=device))
+        logger.info("Best model loaded for testing.")
     except FileNotFoundError:
-        print("Warning: best_model.pth not found. Evaluating with the last model state (which might not be the best).")
+        logger.warning("best_model.pth not found. Evaluating with the last model state (which might not be the best).")
 
     model.eval()
 
     # 释放训练和验证数据集以节省内存
-    print("Releasing training and validation datasets to free memory...")
+    logger.info("Releasing training and validation datasets to free memory...")
     del train_loader, val_loader
     torch.cuda.empty_cache()
     gc.collect()
 
     # 现在加载测试数据集
-    print("Loading test dataset for evaluation...")
+    logger.info("Loading test dataset for evaluation...")
     try:
         test_dataset = util.load_dataset(
             dataset_dir=cfg.dataset.data_dir,
@@ -370,10 +474,10 @@ def run_training(cfg: DictConfig):
             load_train_val=False,  # 不加载训练和验证数据
         )
         test_loader = test_dataset["test_loader"]
-        print("Test dataset loaded.")
+        logger.info("Test dataset loaded.")
     except Exception as e:
-        print(f"测试数据加载失败: {e}")
-        return
+        logger.error(f"测试数据加载失败: {e}")
+        return trainer.best_val_rmse
 
     test_predictions_all_horizons = [[] for _ in range(cfg.dataset.forecast_len)]
     test_targets_all_horizons = [[] for _ in range(cfg.dataset.forecast_len)]
@@ -392,7 +496,7 @@ def run_training(cfg: DictConfig):
                 test_targets_all_horizons[s_idx].append(target_raw_test[:, :, s_idx].cpu())
 
     test_results_per_horizon = []
-    print("\n--- Final Test Results (Per Horizon) ---")
+    logger.info("\n--- Final Test Results (Per Horizon) ---")
     for s_idx in range(cfg.dataset.forecast_len):
         preds_h = torch.cat(test_predictions_all_horizons[s_idx], dim=0)
         targets_h = torch.cat(test_targets_all_horizons[s_idx], dim=0)
@@ -400,148 +504,174 @@ def run_training(cfg: DictConfig):
         m_test = util.metric(preds_h, targets_h)
         horizon_results = {"horizon": s_idx + 1, "mae": m_test[0], "mape": m_test[1], "rmse": m_test[2], "wmape": m_test[3]}
         test_results_per_horizon.append(horizon_results)
-        print(f"Horizon {s_idx+1:02d} - MAE: {m_test[0]:.4f}, RMSE: {m_test[2]:.4f}, MAPE: {m_test[1]:.2f}%, WMAPE: {m_test[3]:.2f}%")
+        logger.info(f"Horizon {s_idx+1:02d} - MAE: {m_test[0]:.4f}, RMSE: {m_test[2]:.4f}, MAPE: {m_test[1]:.2f}%, WMAPE: {m_test[3]:.2f}%")
 
-    pd.DataFrame(training_history).to_csv(os.path.join(output_dir, "training_log.csv"), index=False)
+    pd.DataFrame(training_history).to_csv(os.path.join(cfg.output_dir_for_this_run, "training_log.csv"), index=False)
     df_test_results = pd.DataFrame(test_results_per_horizon)
-    df_test_results.to_csv(os.path.join(output_dir, "test_results_per_horizon.csv"), index=False)
+    df_test_results.to_csv(os.path.join(cfg.output_dir_for_this_run, "test_results_per_horizon.csv"), index=False)
 
     avg_test_metrics = df_test_results.drop(columns=["horizon"]).mean()
-    print("\n--- Average Test Results (All Horizons) ---")
-    print(f"Avg MAE:   {avg_test_metrics['mae']:.4f}")
-    print(f"Avg RMSE:  {avg_test_metrics['rmse']:.4f}")
-    print(f"Avg MAPE:  {avg_test_metrics['mape']:.2f}%")
-    print(f"Avg WMAPE: {avg_test_metrics['wmape']:.2f}%")
+    logger.info("\n--- Average Test Results (All Horizons) ---")
+    logger.info(f"Avg MAE:   {avg_test_metrics['mae']:.4f}")
+    logger.info(f"Avg RMSE:  {avg_test_metrics['rmse']:.4f}")
+    logger.info(f"Avg MAPE:  {avg_test_metrics['mape']:.2f}%")
+    logger.info(f"Avg WMAPE: {avg_test_metrics['wmape']:.2f}%")
 
-    print(f"\nBest validation RMSE achieved during training: {trainer.best_val_rmse:.4f}")
-    print(f"Full results saved to: {output_dir}")
+    logger.info(f"\nBest validation RMSE achieved during training: {trainer.best_val_rmse:.4f}")
+    logger.info(f"Full results saved to: {cfg.output_dir_for_this_run}")
 
     # 最后清理内存
     if torch.cuda.is_available():
-        print("Cleaning up CUDA memory...")
+        logger.info("Cleaning up CUDA memory...")
         model = model.cpu()
         del model, test_loader, scaler
         torch.cuda.empty_cache()
         gc.collect()
-        print("Memory cleanup complete")
+        logger.info("Memory cleanup complete")
 
-    return trainer.best_val_rmse  # 返回最佳验证RMSE，用于Optuna优化
-
-
-def extract_dataset_version_from_config(cfg):
-    """从配置中提取数据集版本信息"""
-    # 检查是否使用了特定的数据集配置
-    dataset_config_name = HydraConfig.get().job.config_name
-    dataset_choice = None
-
-    # 从Hydra配置中获取当前选择的dataset
-    if hasattr(cfg, "defaults"):
-        for default in cfg.defaults:
-            if isinstance(default, dict) and "dataset" in default:
-                dataset_choice = default["dataset"]
-                break
-
-    # 如果没有找到，尝试从HydraConfig获取
-    if not dataset_choice:
-        hydra_cfg = HydraConfig.get()
-        if hasattr(hydra_cfg, "runtime") and hasattr(hydra_cfg.runtime, "choices"):
-            dataset_choice = hydra_cfg.runtime.choices.get("dataset")
-
-    # 检查是否是特定数据集配置（以tec_data_specific_开头）
-    if dataset_choice and dataset_choice.startswith("tec_data_specific_"):
-        dataset_version = dataset_choice.replace("tec_data_specific_", "")
-        print(f"检测到特定数据集配置: {dataset_choice}")
-        print(f"数据集版本: {dataset_version}")
-        return dataset_version
-
-    # 如果是基础配置，尝试从数据路径中推断
-    if hasattr(cfg.dataset, "data_dir") and cfg.dataset.data_dir != "./processed_tec_data":
-        data_dir = cfg.dataset.data_dir.rstrip("/")
-        if "processed_tec_data/" in data_dir:
-            dataset_version = data_dir.split("processed_tec_data/")[-1]
-            if dataset_version:
-                print(f"从数据目录推断数据集版本: {dataset_version}")
-                return dataset_version
-
-    return None
+    return trainer.best_val_rmse
 
 
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def main(cfg: DictConfig) -> float:
     """Hydra主函数"""
+    hydra_cfg = HydraConfig.get()
+    is_optuna_multirun = cfg.get("use_optuna", False) and hydra_cfg.mode == RunMode.MULTIRUN
 
-    # 提取数据集版本信息并设置输出目录
-    dataset_version = extract_dataset_version_from_config(cfg)
-
-    if dataset_version:
-        # 动态设置包含数据集版本信息的输出目录
-        from hydra.core.hydra_config import HydraConfig
-        from omegaconf import open_dict
-
-        hydra_cfg = HydraConfig.get()
-
-        # 获取当前时间信息
-        current_time = datetime.now()
-        date_str = current_time.strftime("%Y-%m-%d")
-        time_str = current_time.strftime("%H-%M-%S")
-
-        # 构建新的输出目录路径
-        new_output_dir = f"./logs/{cfg.project_name}/{cfg.model.model_name}/{date_str}/{time_str}-{dataset_version}"
-
-        # 不要直接修改Hydra配置，而是创建目录并记录路径
-        os.makedirs(new_output_dir, exist_ok=True)
-
-        # 使用open_dict上下文管理器临时允许添加新键
-        with open_dict(cfg):
-            cfg.custom_output_dir = new_output_dir
-
-        print(f"输出目录已设置为: {new_output_dir}")
-
-    # ---- 配置日志记录以捕获print输出 ----
-    output_dir_for_this_run = get_output_dir(cfg)
+    # 1. 决定并创建输出目录
+    output_dir_for_this_run = get_effective_output_dir(cfg)
     os.makedirs(output_dir_for_this_run, exist_ok=True)
 
-    log_file_path = os.path.join(output_dir_for_this_run, "training_run.log")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.FileHandler(log_file_path), logging.StreamHandler(sys.stdout)],  # 输出到文件  # 仍然输出到控制台
-    )
-    logging.info("=== tecGPT Training with Hydra ===")
-    logging.info(f"Output directory for this run: {output_dir_for_this_run}")
-    # ---- 日志配置结束 ----
+    # 暂时不切换目录，先测试基本功能
+    # original_cwd = os.getcwd()
+    # os.chdir(output_dir_for_this_run)
 
-    # 启用内存优化
-    if cfg.device == "cuda" and not cfg.model.get("enable_gradient_checkpointing_llm", False):
-        logging.info("Automatically enabling gradient checkpointing for better memory efficiency")
-        cfg.model.enable_gradient_checkpointing_llm = True
+    # 2. 配置日志记录
+    # 获取一个名为当前模块的logger，而不是root logger
+    logger = logging.getLogger(__name__)
 
-    # 当使用Optuna时，自动减小批量大小以节省内存
-    if cfg.get("use_optuna", False) and cfg.trainer.batch_size > 4:
+    # 清除此logger的旧处理器，以防在Jupyter等环境中重复运行导致重复添加
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    logger.setLevel(logging.INFO)
+
+    # 文件处理器
+    log_file_path = os.path.join(output_dir_for_this_run, "run_output.log")
+    fh = logging.FileHandler(log_file_path, mode="w")
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(process)d][%(levelname)s] %(message)s"))
+    logger.addHandler(fh)
+
+    # 控制台处理器
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    logger.addHandler(sh)
+
+    # 阻止日志事件传递给root logger，特别是Hydra的默认控制台输出，避免重复
+    logger.propagate = False
+
+    logger.info(f"=== tecGPT Training Run (PID: {os.getpid()}) ===")
+    logger.info(f"Hydra Run Mode: {hydra_cfg.mode}")
+    logger.info(f"Output directory for this run: {output_dir_for_this_run}")
+    logger.info(f"Hydra's .hydra config dir: {os.path.join(output_dir_for_this_run, '.hydra')}")
+
+    # 确保 Optuna 存储路径有效
+    if cfg.get("use_optuna", False):
+        cfg.optuna_storage = setup_optuna_storage(cfg)
+        logger.info(f"Optuna 存储设置完成: {cfg.optuna_storage}")
+
+    # 3. 更新配置中可能被Optuna修改的动态项和内存优化
+    if is_optuna_multirun and cfg.trainer.batch_size > 2:
         original_batch_size = cfg.trainer.batch_size
-        cfg.trainer.batch_size = min(cfg.trainer.batch_size, 4)  # 限制为最大4
-        logging.info(f"Optuna mode detected: Reducing batch size from {original_batch_size} to {cfg.trainer.batch_size} to save memory")
+        with open_dict(cfg):
+            cfg.trainer.batch_size = min(original_batch_size, 2)  # 进一步减小Optuna时的batch size
+        logger.info(f"Optuna multirun mode: Batch size reduced from {original_batch_size} to {cfg.trainer.batch_size}")
 
-    logging.info(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
+    # 自动启用梯度检查点以节省内存
+    if cfg.device == "cuda" and not cfg.model.get("enable_gradient_checkpointing_llm", False):
+        logger.info("Automatically enabling gradient checkpointing for LLM.")
+        with open_dict(cfg):
+            cfg.model.enable_gradient_checkpointing_llm = True
 
+    # 自动启用混合精度训练以节省内存
+    if cfg.device == "cuda" and not cfg.trainer.get("use_amp", False):
+        logger.info("Automatically enabling mixed precision training.")
+        with open_dict(cfg):
+            cfg.trainer.use_amp = True
+
+    # 对于单次运行，如果batch size太大，自动减小
+    if not is_optuna_multirun and cfg.trainer.batch_size > 2:
+        original_batch_size = cfg.trainer.batch_size
+        with open_dict(cfg):
+            cfg.trainer.batch_size = min(original_batch_size, 2)  # 保守的batch size
+        logger.info(f"Reduced batch size for memory safety: {original_batch_size} -> {cfg.trainer.batch_size}")
+
+    logger.info(f"Effective Configuration for this run:\n{OmegaConf.to_yaml(cfg)}")
+
+    # 将 output_dir_for_this_run 添加到cfg中
+    with open_dict(cfg):
+        cfg.output_dir_for_this_run = output_dir_for_this_run
+
+    # 4. 执行训练
+    best_val_rmse_result = float("inf")
     try:
-        # 运行训练
-        best_val_rmse = run_training(cfg)
-
-        # 最终清理内存
+        best_val_rmse_result = run_training(cfg, logger)
+    except torch.cuda.OutOfMemoryError as e:
+        logger.error(f"CUDA Out of Memory error: {e}")
+        logger.error("Try reducing batch_size, model.llm_layers_to_use, or model.d_embed")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            gc.collect()
-
-    except Exception as e:
-        logging.error(f"Training failed with error: {e}", exc_info=True)
-
-        # 出错时也清理内存
-        if torch.cuda.is_available():
-            logging.info("Cleaning up CUDA memory after error")
-            torch.cuda.empty_cache()
-            gc.collect()
+        if is_optuna_multirun:
+            return float("inf")
         raise
+    except RuntimeError as e:
+        if "CUDA" in str(e) or "out of memory" in str(e).lower():
+            logger.error(f"CUDA Runtime error: {e}")
+            logger.error("Try reducing model size or batch size")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if is_optuna_multirun:
+                return float("inf")
+        raise
+    except Exception as e:
+        logger.error(f"Training run failed with error: {e}", exc_info=True)
+        if is_optuna_multirun:
+            return float("inf")
+        raise
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+        # 移动.hydra目录到正确位置（如果存在且不在Optuna multirun模式下）
+        if not is_optuna_multirun:
+            project_hydra_dir = ".hydra"
+            target_hydra_dir = os.path.join(output_dir_for_this_run, ".hydra")
+            if os.path.exists(project_hydra_dir) and not os.path.exists(target_hydra_dir):
+                try:
+                    import shutil
+
+                    shutil.move(project_hydra_dir, target_hydra_dir)
+                    logger.info(f"Moved .hydra directory to: {target_hydra_dir}")
+                except Exception as e:
+                    logger.warning(f"Failed to move .hydra directory: {e}")
+
+        logger.info(f"Run finished. All artifacts in: {output_dir_for_this_run}")
+        # 显式关闭文件处理器，确保日志完全写入
+        for handler in logger.handlers:
+            handler.close()
+            logger.removeHandler(handler)
+
+    # 5. Optuna 返回值
+    if is_optuna_multirun:
+        # 确保返回有效的float值
+        if best_val_rmse_result is None or np.isnan(best_val_rmse_result) or np.isinf(best_val_rmse_result):
+            logger.info("Warning: Returning penalty value for failed trial")
+            return 999.0  # 返回大的惩罚值而不是inf
+        logger.info(f"Returning validation RMSE: {best_val_rmse_result}")
+        return float(best_val_rmse_result)
+
+    return 0.0  # 单次运行返回0.0表示成功
 
 
 if __name__ == "__main__":
@@ -550,8 +680,3 @@ if __name__ == "__main__":
     main()
     total_time = (time.time() - script_start_time) / 60
     print(f"\nTotal script execution time: {total_time:.2f} minutes")
-    # 如果logging已配置，也记录到日志
-    try:
-        logging.info(f"Total script execution time: {total_time:.2f} minutes")
-    except:
-        pass

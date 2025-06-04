@@ -1,0 +1,11 @@
+# conf/trainer/test.yaml
+# 专门用于快速测试的trainer配置
+batch_size: 1 # 最小批次大小以避免内存问题
+learning_rate: 0.0001
+epochs: 3 # 很少的epochs用于快速测试
+patience: 2 # 早停的耐心轮数
+weight_decay: 0.01
+clip_grad_norm: 1.0
+print_every_epochs: 1
+optimizer_type: "AdamW"
+use_amp: true 

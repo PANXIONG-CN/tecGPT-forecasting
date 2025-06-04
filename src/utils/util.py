@@ -5,12 +5,40 @@ import pickle
 from tqdm import tqdm  # 假设你可能在其他地方用
 
 
+class DummyScaler:
+    """A dummy scaler for testing purposes, mimicking NodeScaler/FeatureScaler structure."""
+
+    def __init__(self, n_features_or_nodes):
+        self.mean_ = np.zeros(n_features_or_nodes, dtype=np.float32)
+        self.std_ = np.ones(n_features_or_nodes, dtype=np.float32)
+        if isinstance(n_features_or_nodes, int) and n_features_or_nodes > 100:
+            self.scaler_type = "node_scaler_dummy"
+        else:
+            self.scaler_type = "feature_scaler_dummy"
+
+    def fit(self, data):
+        """Dummy method, does nothing."""
+        pass
+
+    def transform(self, data):
+        """Dummy transform."""
+        if self.mean_ is None or self.std_ is None:
+            raise ValueError("Scaler has not been fitted yet.")
+        return (data - self.mean_) / self.std_
+
+    def inverse_transform(self, data):
+        """Dummy inverse transform."""
+        if self.mean_ is None or self.std_ is None:
+            raise ValueError("Scaler has not been fitted yet.")
+        return data * self.std_ + self.mean_
+
+
 class DataLoader(object):
     def __init__(self, data_dict=None, batch_size=32, shuffle=False):
         """
-        数据加载器初始化
+        内存映射数据加载器初始化
         Args:
-            data_dict: 包含'x'和'y'键的字典，或者直接传入x和y数组
+            data_dict: 包含'x'和'y'键的字典，支持内存映射对象
             batch_size: 批处理大小
             shuffle: 是否打乱数据
         """
@@ -18,40 +46,48 @@ class DataLoader(object):
         self.current_ind = 0
         self.should_shuffle = shuffle
 
-        # 处理输入数据
+        # 处理输入数据 - 支持内存映射对象
         if isinstance(data_dict, dict) and "x" in data_dict and "y" in data_dict:
-            self.xs_orig = np.array(data_dict["x"])
-            self.ys_orig = np.array(data_dict["y"])
+            # 直接存储内存映射对象，不复制
+            self.xs_orig = data_dict["x"]
+            self.ys_orig = data_dict["y"]
         else:
             raise ValueError("data_dict必须是包含'x'和'y'键的字典")
 
-        # 复制数据用于处理
-        self.xs = self.xs_orig.copy()
-        self.ys = self.ys_orig.copy()
+        # 不复制数据，直接引用内存映射对象
+        self.xs = self.xs_orig
+        self.ys = self.ys_orig
 
-        # 计算填充
-        self.size = len(self.xs)
-        if self.size > 0:
-            num_padding = (batch_size - (self.size % batch_size)) % batch_size
-            if num_padding > 0:
-                x_padding = np.repeat(self.xs[-1:], num_padding, axis=0)
-                y_padding = np.repeat(self.ys[-1:], num_padding, axis=0)
-                self.xs = np.concatenate([self.xs, x_padding], axis=0)
-                self.ys = np.concatenate([self.ys, y_padding], axis=0)
-                self.size = len(self.xs)
+        # 计算原始未填充的数据大小
+        self.original_size_unpadded = self.xs_orig.shape[0]
+
+        # 计算需要的填充数量
+        self.num_padding = 0
+        if self.original_size_unpadded > 0:
+            self.num_padding = (batch_size - (self.original_size_unpadded % batch_size)) % batch_size
+
+        # 逻辑大小（包括填充）
+        self.size = self.original_size_unpadded + self.num_padding
+
+        # 初始化索引数组用于打乱
+        self.raw_indices = np.arange(self.original_size_unpadded)
+        self.shuffled_indices = self.raw_indices.copy()
 
         self.num_batch = int(self.size // self.batch_size) if self.size > 0 else 0
 
+        print(
+            f"DataLoader初始化: 原始数据大小={self.original_size_unpadded}, 填充={self.num_padding}, "
+            f"逻辑大小={self.size}, 批次数={self.num_batch}"
+        )
+
     def shuffle_data(self):
-        """打乱当前数据副本，而不是原始数据"""
-        if self.size > 0:
-            permutation = np.random.permutation(self.size)
-            self.xs = self.xs[permutation]
-            self.ys = self.ys[permutation]
+        """打乱索引而不是直接打乱数据"""
+        if self.original_size_unpadded > 0:
+            np.random.shuffle(self.shuffled_indices)
 
     def get_iterator(self):
         self.current_ind = 0
-        # 只有当should_shuffle为True时才打乱数据（用于训练集）
+        # 只有当should_shuffle为True时才打乱索引（用于训练集）
         if self.should_shuffle:
             self.shuffle_data()
 
@@ -61,8 +97,30 @@ class DataLoader(object):
             while self.current_ind < self.num_batch:
                 start_ind = self.batch_size * self.current_ind
                 end_ind = min(self.size, self.batch_size * (self.current_ind + 1))
-                x_i = self.xs[start_ind:end_ind, ...]
-                y_i = self.ys[start_ind:end_ind, ...]
+
+                # 按需从内存映射对象构建批次
+                batch_x_list = []
+                batch_y_list = []
+
+                for k_logical_idx in range(start_ind, end_ind):
+                    if k_logical_idx < self.original_size_unpadded:
+                        # 从真实数据获取（使用打乱后的索引）
+                        actual_physical_idx = self.shuffled_indices[k_logical_idx]
+                        sample_x = self.xs_orig[actual_physical_idx]
+                        sample_y = self.ys_orig[actual_physical_idx]
+                    else:
+                        # 填充数据（使用原始数据的最后一个样本）
+                        sample_x = self.xs_orig[self.original_size_unpadded - 1]
+                        sample_y = self.ys_orig[self.original_size_unpadded - 1]
+
+                    # 确保转换为内存中的数组
+                    batch_x_list.append(np.array(sample_x))
+                    batch_y_list.append(np.array(sample_y))
+
+                # 构建批次
+                x_i = np.stack(batch_x_list)
+                y_i = np.stack(batch_y_list)
+
                 yield (x_i, y_i)
                 self.current_ind += 1
 
@@ -129,14 +187,17 @@ class StandardScaler:
     # 但可以保留 inverse_transform_sw 如果模型也预测SW指数 (当前场景不需要)
 
 
-def load_from_files(x_file_path, y_file_path):
-    """从npz文件加载x和y数据"""
+def load_from_files(x_file_path, y_file_path, use_mmap=True):
+    """从npz文件加载x和y数据，支持内存映射"""
     try:
-        x_data = np.load(x_file_path)
-        y_data = np.load(y_file_path)
+        mmap_mode = "r" if use_mmap else None
+        x_data = np.load(x_file_path, mmap_mode=mmap_mode)
+        y_data = np.load(y_file_path, mmap_mode=mmap_mode)
         # 假设npz文件中的数组名为"arr_0"，这是np.save默认行为
         x = x_data["arr_0"] if "arr_0" in x_data else x_data["x"]
         y = y_data["arr_0"] if "arr_0" in y_data else y_data["y"]
+        mmap_info = " (memory mapped)" if use_mmap else ""
+        print(f"从文件加载数据{mmap_info}: x shape {x.shape}, y shape {y.shape}")
         return {"x": x, "y": y}
     except FileNotFoundError:
         raise FileNotFoundError(f"数据文件不存在: {x_file_path} 或 {y_file_path}")
@@ -150,43 +211,43 @@ def load_scaler(scaler_path):
 
 
 def load_dataset(dataset_dir, scaler_path, batch_size=32, target_device=None, load_test=True, load_train_val=True):
-    """Load the preprocessed TEC dataset."""
-    print(f"Loading preprocessed data from: {dataset_dir}")
+    """Load the preprocessed TEC dataset using memory mapping."""
+    print(f"Loading preprocessed data from: {dataset_dir} (using memory mapping)")
 
     train_loader, val_loader = None, None
 
     # 加载训练和验证数据集（如果需要）
     if load_train_val:
-        # 加载训练数据
+        # 加载训练数据 (使用内存映射)
         try:
-            train_data = np.load(os.path.join(dataset_dir, "train.npz"))
+            train_data = np.load(os.path.join(dataset_dir, "train.npz"), mmap_mode="r")
             train_x = train_data["x"]
             train_y = train_data["y"]
-            print(f"Loaded train data: x shape {train_x.shape}, y shape {train_y.shape}")
+            print(f"Loaded train data: x shape {train_x.shape}, y shape {train_y.shape} (memory mapped)")
             # 创建训练数据加载器
             train_loader = DataLoader({"x": train_x, "y": train_y}, batch_size=batch_size, shuffle=True)
         except Exception as e:
             raise Exception(f"训练数据加载失败: {e}")
 
-        # 加载验证数据
+        # 加载验证数据 (使用内存映射)
         try:
-            val_data = np.load(os.path.join(dataset_dir, "val.npz"))
+            val_data = np.load(os.path.join(dataset_dir, "val.npz"), mmap_mode="r")
             val_x = val_data["x"]
             val_y = val_data["y"]
-            print(f"Loaded val data: x shape {val_x.shape}, y shape {val_y.shape}")
+            print(f"Loaded val data: x shape {val_x.shape}, y shape {val_y.shape} (memory mapped)")
             # 创建验证数据加载器
             val_loader = DataLoader({"x": val_x, "y": val_y}, batch_size=batch_size, shuffle=False)
         except Exception as e:
             raise Exception(f"验证数据加载失败: {e}")
 
-    # 有条件地加载测试数据
+    # 有条件地加载测试数据 (使用内存映射)
     test_loader = None
     if load_test:
         try:
-            test_data = np.load(os.path.join(dataset_dir, "test.npz"))
+            test_data = np.load(os.path.join(dataset_dir, "test.npz"), mmap_mode="r")
             test_x = test_data["x"]
             test_y = test_data["y"]
-            print(f"Loaded test data: x shape {test_x.shape}, y shape {test_y.shape}")
+            print(f"Loaded test data: x shape {test_x.shape}, y shape {test_y.shape} (memory mapped)")
             # 创建测试数据加载器
             test_loader = DataLoader({"x": test_x, "y": test_y}, batch_size=batch_size, shuffle=False)
         except Exception as e:

@@ -3,7 +3,6 @@ defaults:
   - model: tecGPT        # 默认模型
   - dataset: tec_data_basic # 默认使用基础配置（预处理时）或特定配置（训练时）
   - trainer: default     # 默认训练器配置
-  - sweeper: basic_optuna # 默认Optuna配置 (如果使用)
   - _self_ # 允许在此文件中直接定义参数
 
 # 实验全局参数
@@ -13,18 +12,30 @@ device: "cuda" # 全局设备设置
 
 # Hydra 配置
 hydra:
-  run: # 单次运行 (包括 use_optuna=false 或未使用 --multirun 时)
-    dir: "." # 设置为点，让 get_output_dir 完全控制
-  sweep: # --multirun 运行 (当 use_optuna=true 时)
-    dir: ./logs/${project_name}/${model.model_name}/optuna_sweep/${now:%Y-%m-%d_%H-%M-%S}
-    subdir: trial_${hydra.job.num} # 每个Optuna trial一个子目录，命名更清晰
-  job_logging: # 控制Hydra自身的日志级别
+  run:
+    # 对于单次运行，实际目录由 src/tec_train.py 中的 get_effective_output_dir 控制
+    # 将 dir 设置为 "." 允许Python脚本完全控制单次运行的输出路径。
+    # Hydra的 .hydra 目录仍会在此路径下生成。
+    dir: "." 
+  sweep:
+    dir: ./logs/${project_name}/${model.model_name}/OPTUNA_SWEEPS/${now:%Y-%m-%d_%H-%M-%S}_${optuna_study_name}
+    subdir: trial_${hydra.job.num} # 每个Optuna trial的子目录
+  job_logging:
+    # 配置Hydra作业本身的日志记录 (Hydra 1.1+ 风格)
+    handlers:
+      file:
+        # 将Hydra自身的作业日志（关于作业启动、覆盖等元信息）保存到每个作业的 .hydra 目录中
+        class: logging.FileHandler
+        filename: hydra.log # 日志文件名
+        formatter: simple # 使用Hydra的simple formatter
     root:
       level: INFO
-  output_subdir: .hydra # Hydra自身配置和日志的子目录
+      handlers: [file] # 只将Hydra的元日志输出到其文件
+    disable_existing_loggers: false # 避免禁用Python脚本中配置的logger
+  output_subdir: .hydra # Hydra自身配置文件和元日志的子目录，会生成在最终的run/trial目录下
 
-# Optuna 配置 (如果使用 use_optuna=true 运行)
-use_optuna: false # 是否执行Optuna超参数搜索
-optuna_trials: 20
-optuna_study_name: "${model.model_name}_study_${now:%Y%m%d_%H%M%S}"
-optuna_storage: "sqlite:///./logs/${project_name}/optuna_studies/${optuna_study_name}.db" # 研究结果会更清晰 
+# Optuna 配置
+use_optuna: false # 是否执行Optuna超参数搜索 (需要配合 --multirun 激活sweeper)
+optuna_trials: 3  # 设置为3以便测试多个trial
+optuna_study_name: "${model.model_name}_study_${now:%Y%m%d_%H%M%S}" # 确保这个在sweep时能正确解析
+optuna_storage: "sqlite:///tecgpt_optuna.db" # 指定SQLite存储以便持久化 

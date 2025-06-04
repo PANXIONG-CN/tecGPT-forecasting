@@ -1,3 +1,0 @@
-- trainer.epochs=1
-- trainer.batch_size=2
-- model.llm_layers_to_use=2

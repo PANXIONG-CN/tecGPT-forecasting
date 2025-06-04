@@ -1,0 +1,26 @@
+# @package hydra/sweeper
+_target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
+
+# storage for Optuna study
+storage: ${optuna_storage}
+study_name: ${optuna_study_name}
+
+# number of parallel workers
+n_jobs: 1
+
+# 'minimize' or 'maximize'
+direction: minimize
+
+# number of trials in the study
+n_trials: ${optuna_trials}
+
+# Optuna Sampler configuration
+sampler:
+  _target_: optuna.samplers.TPESampler
+  seed: ${seed}
+
+# 简化的参数优化
+params:
+  trainer.learning_rate: tag(log, interval(1e-5, 1e-3))
+  trainer.batch_size: choice(2, 4)
+  model.d_embed: choice(64, 128)

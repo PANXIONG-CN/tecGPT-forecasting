@@ -1,5 +1,5 @@
 # conf/trainer/default.yaml
-batch_size: 32
+batch_size: 2 # 降低默认batch size以避免内存问题
 learning_rate: 0.0001 # 初始学习率
 epochs: 50
 patience: 10 # 早停的耐心轮数

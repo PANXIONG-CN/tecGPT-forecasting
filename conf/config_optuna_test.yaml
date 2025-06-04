@@ -1,0 +1,40 @@
+# conf/config_optuna_test.yaml
+# 专门用于Optuna测试的配置
+defaults:
+  - model: tecGPT
+  - dataset: small_test_data # 使用小测试数据集
+  - trainer: test # 使用测试trainer配置
+  - hydra/sweeper: test_optuna # 明确指定使用的sweeper配置
+  - _self_
+
+# 实验全局参数
+project_name: "tecGPT-forecasting"
+seed: 42
+device: "cuda"
+
+# Hydra 配置
+hydra:
+  mode: MULTIRUN
+  run:
+    dir: "."
+  sweep:
+    dir: ./logs/optuna_test/${now:%Y-%m-%d_%H-%M-%S}_${optuna_study_name}
+    subdir: trial_${hydra.job.num}
+  job_logging:
+    handlers:
+      file:
+        class: logging.FileHandler
+        filename: hydra.log
+        formatter: simple
+    root:
+      level: INFO
+      handlers: [file]
+    disable_existing_loggers: false
+  output_subdir: .hydra
+
+# Optuna 配置 - 明确启用
+use_optuna: true  # 明确启用Optuna
+optuna_trials: 3  # 3个试验用于测试
+optuna_study_name: "test_study_${now:%Y%m%d_%H%M%S}"
+# 修改 SQLite 存储路径，确保目录存在
+optuna_storage: "sqlite:///logs/optuna_test_study.db"  # 使用相对路径
