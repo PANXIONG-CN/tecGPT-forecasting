@@ -4,7 +4,7 @@ defaults:
   - model: tecGPT
   - dataset: small_test_data # 使用小测试数据集
   - trainer: test # 使用测试trainer配置
-  - hydra/sweeper: test_optuna # 明确指定使用的sweeper配置
+  - override hydra/sweeper: test_optuna # 使用 override 语法指定 sweeper 配置
   - _self_
 
 # 实验全局参数

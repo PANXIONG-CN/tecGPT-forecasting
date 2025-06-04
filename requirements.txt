@@ -1,23 +1,22 @@
-# Core
-torch
-transformers
-numpy
-pandas
-scipy
-h5py
-scikit-learn
-tqdm
+# Core Deep Learning
+torch>=1.12.0
+transformers>=4.20.0
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
 
-# Experiment Management & Utilities
-hydra-core
-hydra-optuna-sweeper
-wandb
-optuna
+# Data Processing
+h5py>=3.6.0
+scikit-learn>=1.0.0
+tqdm>=4.62.0
 
-# Additional dependencies for visualization and other utilities
-matplotlib
-seaborn
+# Configuration Management & Hyperparameter Optimization
+hydra-core>=1.2.0
+hydra-optuna-sweeper>=1.2.0
+optuna>=3.0.0
 
-# Add other specific dependencies here
-# e.g., matplotlib for plotting
-# tqdm for progress bars 
+# Experiment Tracking (Optional)
+wandb>=0.13.0
+
+# Additional Utilities
+pickle5>=0.0.11; python_version < "3.8"
